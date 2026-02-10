@@ -254,7 +254,7 @@ function App() {
             </div>
             <div>
               <span className="meta-label">Backend</span>
-              <span className="meta-value">Spring Boot + Python agents</span>
+              <span className="meta-value">LangGraph + Python agents</span>
             </div>
             <div>
               <span className="meta-label">Security</span>
