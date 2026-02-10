@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const metrics = [
@@ -99,8 +99,21 @@ const roles = [
 function App() {
   const [metricIndex, setMetricIndex] = useState(0)
   const [view, setView] = useState('landing')
+  const [theme, setTheme] = useState('light')
 
   const metric = useMemo(() => metrics[metricIndex], [metricIndex])
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem('campnou-theme')
+    if (stored) {
+      setTheme(stored)
+    }
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    window.localStorage.setItem('campnou-theme', theme)
+  }, [theme])
 
   const handleCycle = () => {
     setMetricIndex((prev) => (prev + 1) % metrics.length)
@@ -114,6 +127,10 @@ function App() {
     event.currentTarget.style.setProperty('--spot-y', `${y}px`)
   }
 
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
+  }
+
   if (view === 'login' || view === 'signup') {
     return (
       <div className="page" onMouseMove={handleMove}>
@@ -125,6 +142,9 @@ function App() {
             Camp-nou
           </button>
           <div className="nav-actions">
+            <button type="button" className="btn ghost theme-toggle" onClick={toggleTheme}>
+              {theme === 'light' ? 'Dark mode' : 'Light mode'}
+            </button>
             <button type="button" className="btn ghost" onClick={() => setView('landing')}>
               Back to overview
             </button>
@@ -222,6 +242,9 @@ function App() {
           Camp-nou
         </button>
         <div className="nav-actions">
+          <button type="button" className="btn ghost theme-toggle" onClick={toggleTheme}>
+            {theme === 'light' ? 'Dark mode' : 'Light mode'}
+          </button>
           <button type="button" className="btn ghost" onClick={() => setView('login')}>
             Login
           </button>
@@ -254,7 +277,7 @@ function App() {
             </div>
             <div>
               <span className="meta-label">Backend</span>
-              <span className="meta-value">Spring Boot + Python agents</span>
+              <span className="meta-value">LangGraph + Python agents</span>
             </div>
             <div>
               <span className="meta-label">Security</span>
