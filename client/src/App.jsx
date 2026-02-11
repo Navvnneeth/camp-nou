@@ -96,10 +96,33 @@ const roles = [
   }
 ]
 
+const clubs = [
+  'EXCEL',
+  'IEDC',
+  'MACS',
+  'IEEE',
+  'EMF',
+  'FOSS',
+  'Bharatham',
+  'TEDx'
+]
+
+const venues = [
+  'SDPK',
+  'Internal Auditorium',
+  'External Auditorium',
+  'Media Hall',
+  'Amphie Theater'
+]
+
 function App() {
   const [metricIndex, setMetricIndex] = useState(0)
   const [view, setView] = useState('landing')
   const [theme, setTheme] = useState('light')
+  const [selectedClub, setSelectedClub] = useState('')
+  const [selectedVenue, setSelectedVenue] = useState('')
+  const [selectedDate, setSelectedDate] = useState('')
+  const [notice, setNotice] = useState('')
 
   const metric = useMemo(() => metrics[metricIndex], [metricIndex])
 
@@ -115,6 +138,12 @@ function App() {
     window.localStorage.setItem('campnou-theme', theme)
   }, [theme])
 
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 3200)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   const handleCycle = () => {
     setMetricIndex((prev) => (prev + 1) % metrics.length)
   }
@@ -129,6 +158,11 @@ function App() {
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
+  }
+
+  const handleBooking = () => {
+    if (!selectedClub || !selectedVenue || !selectedDate) return
+    setNotice(`Booked ${selectedClub} at ${selectedVenue} on ${selectedDate}`)
   }
 
   if (view === 'login' || view === 'signup') {
@@ -204,7 +238,7 @@ function App() {
                   </button>
                 </div>
               </div>
-              <button type="button" className="btn primary full">
+              <button type="button" className="btn primary full" onClick={() => setView('booking')}>
                 {view === 'login' ? 'Login' : 'Create account'}
               </button>
             </form>
@@ -227,6 +261,127 @@ function App() {
             </div>
           </div>
         </section>
+      </div>
+    )
+  }
+
+  if (view === 'booking') {
+    return (
+      <div className="page" onMouseMove={handleMove}>
+        <div className="orb orb-one" />
+        <div className="orb orb-two" />
+        <div className="orb orb-three" />
+
+        <header className="topbar">
+          <button type="button" className="brand" onClick={() => setView('landing')}>
+            Camp-nou
+          </button>
+          <div className="nav-actions">
+            <button type="button" className="btn ghost theme-toggle" onClick={toggleTheme}>
+              {theme === 'light' ? 'Dark mode' : 'Light mode'}
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setView('landing')}>
+              Back to overview
+            </button>
+          </div>
+        </header>
+
+        <section className="booking-shell">
+          <div className="booking-copy">
+            <span className="eyebrow">Club Booking</span>
+            <h1>Reserve halls with confidence</h1>
+            <p className="lede">
+              Pick your club, select a venue, and lock in the date. The system will
+              confirm instantly.
+            </p>
+            <div className="booking-grid">
+              <div className="booking-card">
+                <h3>Available Clubs</h3>
+                <div className="chip-grid">
+                  {clubs.map((club) => (
+                    <button
+                      key={club}
+                      type="button"
+                      className={`chip selectable ${selectedClub === club ? 'active' : ''}`}
+                      onClick={() => setSelectedClub(club)}
+                    >
+                      {club}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="booking-card">
+                <h3>Venues</h3>
+                <div className="chip-grid">
+                  {venues.map((venue) => (
+                    <button
+                      key={venue}
+                      type="button"
+                      className={`chip selectable ${selectedVenue === venue ? 'active' : ''}`}
+                      onClick={() => setSelectedVenue(venue)}
+                    >
+                      {venue}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="booking-panel">
+            <div className="booking-card highlight">
+              <div className="booking-header">
+                <span>Booking details</span>
+                <span className="pill">No backend yet</span>
+              </div>
+              <div className="booking-form">
+                <label className="field">
+                  Club
+                  <select value={selectedClub} onChange={(event) => setSelectedClub(event.target.value)}>
+                    <option value="">Select club</option>
+                    {clubs.map((club) => (
+                      <option key={club} value={club}>
+                        {club}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  Venue
+                  <select value={selectedVenue} onChange={(event) => setSelectedVenue(event.target.value)}>
+                    <option value="">Select venue</option>
+                    {venues.map((venue) => (
+                      <option key={venue} value={venue}>
+                        {venue}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  Date
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(event) => setSelectedDate(event.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn primary full"
+                  onClick={handleBooking}
+                  disabled={!selectedClub || !selectedVenue || !selectedDate}
+                >
+                  Book now
+                </button>
+                <p className="booking-hint">
+                  Bookings are confirmed instantly and logged for audit review.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {notice && <div className="toast">{notice}</div>}
       </div>
     )
   }
