@@ -207,7 +207,6 @@ function App() {
           <div className="auth-card">
             <div className="auth-header">
               <span>{view === 'login' ? 'Login' : 'Sign Up'}</span>
-              <span className="pill">No backend yet</span>
             </div>
             <form className="auth-form">
               <label>
