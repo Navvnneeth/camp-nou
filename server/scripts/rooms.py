@@ -18,10 +18,15 @@ def insert_rooms_from_excel(file, db_invoker: DBInvoker):
         if pd.isna(row["name"]) or pd.isna(row["capacity"]):
             continue
 
+        room_type = "classroom"
+        if "room_type" in df.columns and not pd.isna(row.get("room_type", None)):
+            room_type = str(row["room_type"]).strip().lower()
+
         rooms.append(
             Rooms(
                 name=str(row["name"]).strip(),
                 capacity=int(row["capacity"]),
+                room_type=room_type,
             )
         )
 
