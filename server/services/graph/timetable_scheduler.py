@@ -22,6 +22,15 @@ from services.models.models import (
 )
 from datetime import datetime
 import random
+import json
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="google/gemma-4-e4b",
+    base_url="http://127.0.0.1:1234/v1",
+    api_key="lm-studio",
+    temperature=0.2,
+)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -231,16 +240,8 @@ def build_constraints(state: TimetableState) -> dict:
 
 # ─── Node: generate_initial_timetable ─────────────────────────────────────────
 
-def generate_initial_timetable(state: TimetableState) -> dict:
-    """
-    Greedy slot-fill algorithm:
-      1. Schedule lab periods first (they need 3 consecutive slots).
-      2. Schedule lectures in remaining slots.
-      3. Respect faculty non-overlap.
-      4. Assign rooms — labs to lab rooms, lectures to classrooms.
-         When classrooms are scarce, use classrooms freed by lab displacement.
-    """
-    print("[generate_initial_timetable] Generating timetable...")
+def _generate_initial_timetable_fallback(state: TimetableState) -> dict:
+    print("[generate_initial_timetable] Fallback to deterministic algorithm...")
     timetable = state["timetable"]
     class_reqs = timetable.get("__requirements__", {})
     classrooms = state["classrooms"]
@@ -249,69 +250,48 @@ def generate_initial_timetable(state: TimetableState) -> dict:
     room_schedule: Dict[str, Any] = {}
     faculty_schedule: Dict[str, Any] = {}
     conflicts: List[Dict] = []
-    warnings: List[str] = []
+    warnings: List[str] = list(state.get("warnings", []))
+    warnings.append("AI fallback used for generate_initial_timetable")
 
-    # Initialize timetable slots for each class
     for cn in state["classes"]:
-        timetable[cn] = {}
+        if cn not in timetable:
+            timetable[cn] = {}
         for day in DAYS:
-            timetable[cn][day] = {}
+            if day not in timetable[cn]:
+                timetable[cn][day] = {}
 
-    # ── Phase 1: Schedule LAB periods ──────────────────────────────────────
     for cn in state["classes"]:
         reqs = class_reqs.get(cn, [])
         lab_reqs = [r for r in reqs if r["is_lab"]]
         for lr in lab_reqs:
             scheduled_hours = 0
-            target = lr["hours"]  # typically 3
+            target = lr["hours"]
             while scheduled_hours < target:
                 placed = False
                 needed = min(LAB_DURATION, target - scheduled_hours)
                 for day in DAYS:
-                    if placed:
-                        break
-                    # Try each starting slot that allows `needed` consecutive
+                    if placed: break
                     for start_slot in range(1, SLOTS_PER_DAY - needed + 2):
                         slots_needed = list(range(start_slot, start_slot + needed))
-                        # Check class slots free
-                        if any(_slot_key(s) in timetable[cn][day] for s in slots_needed):
-                            continue
-                        # Check faculty free
-                        if not all(
-                            _is_faculty_free(faculty_schedule, lr["faculty_id"], day, s)
-                            for s in slots_needed
-                        ):
-                            continue
-                        # Find a lab room
+                        if any(_slot_key(s) in timetable[cn][day] for s in slots_needed): continue
+                        if not all(_is_faculty_free(faculty_schedule, lr["faculty_id"], day, s) for s in slots_needed): continue
                         lab_room = _find_free_lab(labs_rooms, room_schedule, day, slots_needed)
-                        if not lab_room:
-                            continue
+                        if not lab_room: continue
 
-                        # Place lab
                         for s in slots_needed:
-                            entry = {
-                                "subject_id": lr["subject_id"],
-                                "faculty_id": lr["faculty_id"],
-                                "room_id": lab_room["id"],
-                                "is_lab_period": True,
-                                "status": "scheduled",
+                            timetable[cn][day][_slot_key(s)] = {
+                                "subject_id": lr["subject_id"], "faculty_id": lr["faculty_id"],
+                                "room_id": lab_room["id"], "is_lab_period": True, "status": "scheduled",
                             }
-                            timetable[cn][day][_slot_key(s)] = entry
                             _book_room(room_schedule, lab_room["id"], day, s, cn)
                             _book_faculty(faculty_schedule, lr["faculty_id"], day, s, cn)
-
                         scheduled_hours += needed
                         placed = True
                         break
-
                 if not placed:
-                    warnings.append(
-                        f"Could not schedule lab '{lr['subject_name']}' for {cn} "
-                        f"({scheduled_hours}/{target} hours placed)"
-                    )
+                    warnings.append(f"Could not schedule lab '{lr['subject_name']}' for {cn}")
                     break
 
-    # ── Phase 2: Schedule LECTURE periods ──────────────────────────────────
     for cn in state["classes"]:
         reqs = class_reqs.get(cn, [])
         lecture_reqs = [r for r in reqs if not r["is_lab"]]
@@ -321,86 +301,199 @@ def generate_initial_timetable(state: TimetableState) -> dict:
             while scheduled_hours < target:
                 placed = False
                 for day in DAYS:
-                    if placed:
-                        break
+                    if placed: break
                     for slot in range(1, SLOTS_PER_DAY + 1):
                         sk = _slot_key(slot)
-                        # Class slot free?
-                        if sk in timetable[cn][day]:
-                            continue
-                        # Faculty free?
-                        if not _is_faculty_free(faculty_schedule, lr["faculty_id"], day, slot):
-                            continue
-                        # Find a classroom
+                        if sk in timetable[cn][day]: continue
+                        if not _is_faculty_free(faculty_schedule, lr["faculty_id"], day, slot): continue
                         classroom = _find_free_classroom(classrooms, room_schedule, day, slot)
                         if not classroom:
-                            # No classroom available — record as conflict for later
                             conflicts.append({
-                                "class_name": cn,
-                                "day": day,
-                                "slot": slot,
-                                "subject_id": lr["subject_id"],
-                                "faculty_id": lr["faculty_id"],
+                                "class_name": cn, "day": day, "slot": slot,
+                                "subject_id": lr["subject_id"], "faculty_id": lr["faculty_id"],
                                 "reason": "no_classroom_available",
                             })
-                            # Still place the entry without a room for now
                             timetable[cn][day][sk] = {
-                                "subject_id": lr["subject_id"],
-                                "faculty_id": lr["faculty_id"],
-                                "room_id": None,
-                                "is_lab_period": False,
-                                "status": "unassigned_room",
+                                "subject_id": lr["subject_id"], "faculty_id": lr["faculty_id"],
+                                "room_id": None, "is_lab_period": False, "status": "unassigned_room",
                             }
                             _book_faculty(faculty_schedule, lr["faculty_id"], day, slot, cn)
                             scheduled_hours += 1
                             placed = True
                             break
 
-                        # Place lecture
                         timetable[cn][day][sk] = {
-                            "subject_id": lr["subject_id"],
-                            "faculty_id": lr["faculty_id"],
-                            "room_id": classroom["id"],
-                            "is_lab_period": False,
-                            "status": "scheduled",
+                            "subject_id": lr["subject_id"], "faculty_id": lr["faculty_id"],
+                            "room_id": classroom["id"], "is_lab_period": False, "status": "scheduled",
                         }
                         _book_room(room_schedule, classroom["id"], day, slot, cn)
                         _book_faculty(faculty_schedule, lr["faculty_id"], day, slot, cn)
                         scheduled_hours += 1
                         placed = True
                         break
-
                 if not placed:
-                    warnings.append(
-                        f"Could not schedule lecture '{lr['subject_name']}' for {cn} "
-                        f"({scheduled_hours}/{target} hours placed)"
-                    )
+                    warnings.append(f"Could not schedule lecture '{lr['subject_name']}' for {cn}")
                     break
 
-    print(
-        f"[generate_initial_timetable] Done. {len(conflicts)} room conflicts, "
-        f"{len(warnings)} warnings"
-    )
     return {
-        "timetable": timetable,
-        "room_schedule": room_schedule,
-        "faculty_schedule": faculty_schedule,
-        "conflicts": conflicts,
-        "warnings": warnings,
+        "timetable": timetable, "room_schedule": room_schedule,
+        "faculty_schedule": faculty_schedule, "conflicts": conflicts, "warnings": warnings,
     }
+
+
+def generate_initial_timetable(state: TimetableState) -> dict:
+    print("[generate_initial_timetable] Generating timetable via AI...")
+    
+    # Check if empty data
+    if not state.get("classrooms") or not state.get("labs") or not state.get("faculty_mappings"):
+        warnings = list(state.get("warnings", []))
+        warnings.append("Empty data for classrooms, labs, or faculty_mappings. AI skipped.")
+        return {
+            "timetable": state.get("timetable", {}),
+            "room_schedule": {}, "faculty_schedule": {}, "conflicts": [], "warnings": warnings
+        }
+
+    constraints_payload = {
+        "task": "generate_college_timetable",
+        "constraints": {
+            "days": DAYS,
+            "slots_per_day": SLOTS_PER_DAY,
+            "lab_duration_slots": LAB_DURATION,
+            "classes": state["classes"],
+            "classrooms": state["classrooms"],
+            "labs": state["labs"],
+            "subjects": state["subjects"],
+            "faculty_mappings": state["faculty_mappings"]
+        },
+        "hard_constraints": [
+            "A faculty member may teach at most one class in any given (day, slot)",
+            "A room may be occupied by at most one class in any given (day, slot)",
+            "Lab sessions must occupy exactly 3 consecutive slots on the same day",
+            "Lab sessions must be assigned to a room with room_type=lab",
+            "Lecture sessions must be assigned to a room with room_type=classroom",
+            "Every subject's required hours_per_week must be scheduled across the week"
+        ],
+        "soft_constraints": [
+            "Distribute a subject's hours evenly across different days where possible",
+            "Avoid scheduling more than 2 consecutive lectures of the same subject for one class",
+            "Prefer scheduling lab sessions earlier in the week"
+        ],
+        "room_scarcity_rules": [
+            "If the number of classes exceeds the number of classrooms, stagger classes so their lecture slots do not overlap where possible",
+            "When a class leaves its classroom for a lab session, that classroom slot becomes free and may be reused by another class",
+            "An unused lab room (no lab session at that slot) may be reassigned as a classroom for that slot only",
+            "If a slot cannot be assigned any room, mark it status=unassigned_room and record it in the conflicts list for the resolve step"
+        ],
+        "edge_cases": [
+            "1. Room scarcity: Stagger overlapping slots. Exploit lab-period vacancies.",
+            "2. Faculty teaching multiple classes: Track faculty across all classes simultaneously.",
+            "3. Lab rooms as temporary classrooms: Only when no class has a lab session in that slot.",
+            "4. Consecutive lab slots: 3 back-to-back slots, no splitting across days.",
+            "5. Hours balance: Fully schedule every subject's hours_per_week.",
+            "6. Duplicate section names across branches: Keep branch prefix (e.g. CS-A)."
+        ]
+    }
+
+    prompt = f"""You are an advanced college timetable generator.
+    
+Payload:
+{json.dumps(constraints_payload)}
+
+Return the full timetable in this exact JSON shape (must match the existing structure):
+{{
+  "timetable": {{
+    "CS-A": {{
+      "Monday": {{
+        "1": {{"subject_id":1,"faculty_id":2,"room_id":1,"is_lab_period":false,"status":"scheduled"}},
+        "2": {{"subject_id":3,"faculty_id":5,"room_id":1,"is_lab_period":false,"status":"scheduled"}}
+      }}
+    }}
+  }},
+  "conflicts": [
+    {{"class_name":"CS-B","day":"Tuesday","slot":3,"subject_id":2,"faculty_id":3,"reason":"no_classroom_available"}}
+  ],
+  "warnings": []
+}}
+"""
+
+    try:
+        response = llm.invoke(prompt)
+        content = response.content
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].strip()
+            
+        result = json.loads(content)
+        
+        ai_tt = result.get("timetable", {})
+        conflicts = result.get("conflicts", [])
+        warnings = list(state.get("warnings", [])) + result.get("warnings", [])
+        
+        # Validation
+        room_schedule = {}
+        faculty_schedule = {}
+        validated_tt = state.get("timetable", {})
+        
+        # Merge old reqs if they exist
+        reqs = validated_tt.get("__requirements__", {})
+        validated_tt = {k: v for k, v in ai_tt.items()}
+        validated_tt["__requirements__"] = reqs
+        
+        # Build schedules and check constraints
+        for cn, class_tt in ai_tt.items():
+            if cn == "__requirements__": continue
+            for day, day_tt in class_tt.items():
+                for slot_str, entry in list(day_tt.items()):
+                    slot = int(slot_str)
+                    room_id = entry.get("room_id")
+                    fac_id = entry.get("faculty_id")
+                    
+                    is_valid = True
+                    reason = ""
+                    
+                    if room_id and not _is_room_free(room_schedule, room_id, day, slot):
+                        is_valid = False
+                        reason = "room_double_booked"
+                    elif fac_id and not _is_faculty_free(faculty_schedule, fac_id, day, slot):
+                        is_valid = False
+                        reason = "faculty_double_booked"
+                        
+                    if not is_valid:
+                        print(f"Validation failed for {cn} {day} {slot}: {reason}")
+                        conflicts.append({
+                            "class_name": cn,
+                            "day": day,
+                            "slot": slot,
+                            "subject_id": entry.get("subject_id"),
+                            "faculty_id": entry.get("faculty_id"),
+                            "reason": reason
+                        })
+                        del validated_tt[cn][day][slot_str]
+                    else:
+                        if room_id:
+                            _book_room(room_schedule, room_id, day, slot, cn)
+                        if fac_id:
+                            _book_faculty(faculty_schedule, fac_id, day, slot, cn)
+
+        return {
+            "timetable": validated_tt,
+            "room_schedule": room_schedule,
+            "faculty_schedule": faculty_schedule,
+            "conflicts": conflicts,
+            "warnings": warnings,
+        }
+
+    except Exception as e:
+        print(f"[generate_initial_timetable] Error calling AI: {e}")
+        return _generate_initial_timetable_fallback(state)
 
 
 # ─── Node: resolve_room_conflicts ─────────────────────────────────────────────
 
-def resolve_room_conflicts(state: TimetableState) -> dict:
-    """
-    Try to fix entries with status='unassigned_room' using these strategies:
-      1. Lab displacement — if another class is in lab, their classroom is free.
-      2. Reschedule to a different day/slot with room availability.
-      3. Suspend the class as a last resort.
-    """
+def _resolve_room_conflicts_fallback(state: TimetableState) -> dict:
     iteration = state.get("iteration", 0) + 1
-    print(f"[resolve_room_conflicts] Iteration {iteration}...")
+    print(f"[_resolve_room_conflicts_fallback] Iteration {iteration}...")
 
     timetable = state["timetable"]
     room_schedule = state["room_schedule"]
@@ -408,6 +501,7 @@ def resolve_room_conflicts(state: TimetableState) -> dict:
     classrooms = state["classrooms"]
     conflicts = state["conflicts"]
     warnings = list(state.get("warnings", []))
+    warnings.append("AI fallback used for resolve_room_conflicts")
 
     new_conflicts = []
 
@@ -419,14 +513,10 @@ def resolve_room_conflicts(state: TimetableState) -> dict:
 
         entry = timetable.get(cn, {}).get(day, {}).get(sk)
         if not entry or entry.get("status") != "unassigned_room":
-            continue  # already resolved
+            continue
 
         resolved = False
 
-        # ── Strategy 1: Lab displacement ──
-        # Check all other classes: if any class has lab in this (day, slot), then
-        # that class's "home classroom" assignment from another slot tells us
-        # which classroom they normally use — and it's free now.
         classroom = _find_free_classroom(classrooms, room_schedule, day, slot)
         if classroom:
             entry["room_id"] = classroom["id"]
@@ -434,29 +524,17 @@ def resolve_room_conflicts(state: TimetableState) -> dict:
             _book_room(room_schedule, classroom["id"], day, slot, cn)
             resolved = True
 
-        # ── Strategy 2: Reschedule to another day/slot ──
         if not resolved:
             for alt_day in DAYS:
-                if resolved:
-                    break
+                if resolved: break
                 for alt_slot in range(1, SLOTS_PER_DAY + 1):
                     ask = _slot_key(alt_slot)
-                    # Class slot must be free on new day
-                    if ask in timetable.get(cn, {}).get(alt_day, {}):
-                        continue
-                    # Faculty must be free
-                    if not _is_faculty_free(
-                        faculty_schedule, entry["faculty_id"], alt_day, alt_slot
-                    ):
-                        continue
-                    # Room must be available
+                    if ask in timetable.get(cn, {}).get(alt_day, {}): continue
+                    if not _is_faculty_free(faculty_schedule, entry["faculty_id"], alt_day, alt_slot): continue
                     cr = _find_free_classroom(classrooms, room_schedule, alt_day, alt_slot)
-                    if not cr:
-                        continue
+                    if not cr: continue
 
-                    # Move the entry
                     del timetable[cn][day][sk]
-                    # Unbook faculty from old slot
                     fk = _faculty_key(entry["faculty_id"])
                     if fk in faculty_schedule and day in faculty_schedule[fk]:
                         faculty_schedule[fk][day].pop(sk, None)
@@ -467,30 +545,152 @@ def resolve_room_conflicts(state: TimetableState) -> dict:
                     _book_room(room_schedule, cr["id"], alt_day, alt_slot, cn)
                     _book_faculty(faculty_schedule, entry["faculty_id"], alt_day, alt_slot, cn)
 
-                    warnings.append(
-                        f"Rescheduled {cn} subject {entry['subject_id']} "
-                        f"from {day} slot {slot} to {alt_day} slot {alt_slot}"
-                    )
+                    warnings.append(f"Rescheduled {cn} subject {entry['subject_id']} from {day} slot {slot} to {alt_day} slot {alt_slot}")
                     resolved = True
                     break
 
-        # ── Strategy 3: Suspend ──
         if not resolved:
             entry["status"] = "suspended"
             entry["room_id"] = None
-            warnings.append(
-                f"SUSPENDED {cn} subject {entry['subject_id']} on {day} slot {slot} — "
-                f"no classroom available"
-            )
+            warnings.append(f"SUSPENDED {cn} subject {entry['subject_id']} on {day} slot {slot} — no classroom available")
 
     return {
-        "timetable": timetable,
-        "room_schedule": room_schedule,
-        "faculty_schedule": faculty_schedule,
-        "conflicts": new_conflicts,
-        "warnings": warnings,
-        "iteration": iteration,
+        "timetable": timetable, "room_schedule": room_schedule,
+        "faculty_schedule": faculty_schedule, "conflicts": new_conflicts,
+        "warnings": warnings, "iteration": iteration,
     }
+
+
+def resolve_room_conflicts(state: TimetableState) -> dict:
+    iteration = state.get("iteration", 0) + 1
+    print(f"[resolve_room_conflicts] Iteration {iteration} via AI...")
+    
+    timetable = state["timetable"]
+    room_schedule = state["room_schedule"]
+    faculty_schedule = state["faculty_schedule"]
+    conflicts = state["conflicts"]
+    warnings = list(state.get("warnings", []))
+
+    if not conflicts:
+        return state
+
+    prompt = f"""You are an AI conflict resolver for a college timetable.
+
+Conflicts to resolve:
+{json.dumps(conflicts)}
+
+Current Timetable Snapshot (showing only scheduled entries):
+{json.dumps({k: v for k, v in timetable.items() if k != '__requirements__'})}
+
+Room Schedule Snapshot:
+{json.dumps(room_schedule)}
+
+Available actions:
+1. `lab_displacement` — use a classroom vacated by another class in lab at this slot
+2. `reschedule` — move to a different (day, slot) with free room and free faculty
+3. `use_lab_as_classroom` — use a free lab room as fallback classroom
+4. `suspend` — no option works
+
+Respond in valid JSON only:
+{{
+  "resolutions": [
+    {{
+      "class_name": "CS-B",
+      "original_day": "Tuesday",
+      "original_slot": 3,
+      "action": "reschedule",
+      "new_day": "Wednesday",
+      "new_slot": 2,
+      "room_id": 2
+    }}
+  ]
+}}
+"""
+    try:
+        response = llm.invoke(prompt)
+        content = response.content
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].strip()
+            
+        result = json.loads(content)
+        resolutions = result.get("resolutions", [])
+        
+        new_conflicts = []
+        for res in resolutions:
+            cn = res.get("class_name")
+            orig_day = res.get("original_day")
+            orig_slot = int(res.get("original_slot"))
+            action = res.get("action")
+            
+            sk = _slot_key(orig_slot)
+            entry = timetable.get(cn, {}).get(orig_day, {}).get(sk)
+            
+            if not entry or entry.get("status") != "unassigned_room":
+                continue
+                
+            resolved = False
+            
+            if action in ["lab_displacement", "use_lab_as_classroom"]:
+                room_id = res.get("room_id")
+                if room_id and _is_room_free(room_schedule, room_id, orig_day, orig_slot):
+                    entry["room_id"] = room_id
+                    entry["status"] = "scheduled"
+                    _book_room(room_schedule, room_id, orig_day, orig_slot, cn)
+                    resolved = True
+            elif action == "reschedule":
+                new_day = res.get("new_day")
+                new_slot = int(res.get("new_slot"))
+                room_id = res.get("room_id")
+                
+                n_sk = _slot_key(new_slot)
+                
+                # Check constraints
+                if n_sk not in timetable.get(cn, {}).get(new_day, {}):
+                    if _is_faculty_free(faculty_schedule, entry.get("faculty_id"), new_day, new_slot):
+                        if room_id and _is_room_free(room_schedule, room_id, new_day, new_slot):
+                            # Move entry
+                            del timetable[cn][orig_day][sk]
+                            fk = _faculty_key(entry["faculty_id"])
+                            if fk in faculty_schedule and orig_day in faculty_schedule[fk]:
+                                faculty_schedule[fk][orig_day].pop(sk, None)
+                                
+                            entry["room_id"] = room_id
+                            entry["status"] = "rescheduled"
+                            timetable[cn].setdefault(new_day, {})[n_sk] = entry
+                            
+                            _book_room(room_schedule, room_id, new_day, new_slot, cn)
+                            _book_faculty(faculty_schedule, entry["faculty_id"], new_day, new_slot, cn)
+                            
+                            warnings.append(f"Rescheduled {cn} subject {entry['subject_id']} from {orig_day} slot {orig_slot} to {new_day} slot {new_slot}")
+                            resolved = True
+
+            if not resolved:
+                entry["status"] = "suspended"
+                entry["room_id"] = None
+                warnings.append(f"SUSPENDED {cn} subject {entry['subject_id']} on {orig_day} slot {orig_slot} — AI failed or constraints violated")
+
+        # Any conflicts not in resolutions also get suspended
+        handled_keys = [(r.get("class_name"), r.get("original_day"), int(r.get("original_slot"))) for r in resolutions if r.get("original_slot")]
+        for c in conflicts:
+            if (c["class_name"], c["day"], c["slot"]) not in handled_keys:
+                entry = timetable.get(c["class_name"], {}).get(c["day"], {}).get(_slot_key(c["slot"]))
+                if entry and entry.get("status") == "unassigned_room":
+                    entry["status"] = "suspended"
+                    entry["room_id"] = None
+                    warnings.append(f"SUSPENDED {c['class_name']} subject {entry['subject_id']} on {c['day']} slot {c['slot']} — ignored by AI")
+
+        return {
+            "timetable": timetable, "room_schedule": room_schedule,
+            "faculty_schedule": faculty_schedule, "conflicts": new_conflicts,
+            "warnings": warnings, "iteration": iteration,
+        }
+
+    except Exception as e:
+        print(f"[resolve_room_conflicts] Error calling AI: {e}")
+        # Only fallback if AI completely failed
+        return _resolve_room_conflicts_fallback(state)
 
 
 # ─── Conditional: still have conflicts? ───────────────────────────────────────
