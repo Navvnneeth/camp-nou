@@ -6,12 +6,15 @@ from sqlalchemy.orm import Session
 from services.dependencies.db import get_db_session
 from services.models.models import Students, Rooms, Classrooms
 from datetime import datetime
+import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
+load_dotenv()
+
 llm = ChatOpenAI(
-    model="google/gemma-4-e4b",
-    base_url="http://127.0.0.1:1234/v1",
-    api_key="lm-studio",
+    model="gpt-5.4",
+    api_key=os.getenv("OPEN_AI_KEY"),
     temperature=0.2,
 )
 
