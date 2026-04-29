@@ -228,16 +228,11 @@ function App() {
 
       <section className="hero">
         <div>
-          <p className="eyebrow">Backend sync ready</p>
           <h1>Upload inputs, generate the timetable, and explore every class in one flow.</h1>
-          <p className="lede">
-            This frontend mirrors the FastAPI contract. Upload Excel sheets, trigger the scheduler, and review
-            class-level grids without leaving the dashboard.
-          </p>
+          <p className="lede">Camp-Nou, Your Friendly Neighbourhood Campus Orchestrator</p>
         </div>
         <div className="hero-card">
           <h3>Live Sync Status</h3>
-          <p>{apiStatus.message}</p>
           <div className="hero-meta">
             <div>
               <span>Rooms upload</span>
