@@ -1,9 +1,11 @@
 from typing import List, Dict, Any, TypedDict, Annotated
 import operator
+import json
 from langgraph.graph import StateGraph, END
 from sqlalchemy.orm import Session
 from services.dependencies.db import get_db_session
 from services.models.models import Students, Rooms, Classrooms
+from services.graph.gemini_agent import gemini_generate_json, gemini_is_available
 from datetime import datetime
 
 class SchedulerState(TypedDict):
@@ -35,7 +37,42 @@ def fetch_data(state: SchedulerState):
 def sort_students(state: SchedulerState):
     print("Sorting students...")
     students = state["students"]
-    # Sort by id (number)
+    if gemini_is_available() and students:
+        prompt = (
+            "You are assigning students into room-sized class groups. "
+            "Return JSON with key 'student_order' as a list of student IDs ordered "
+            "to balance branches across rooms while keeping IDs only from the payload. "
+            "Do not invent IDs."
+        )
+        schema = {
+            "type": "object",
+            "properties": {
+                "student_order": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                }
+            },
+            "required": ["student_order"],
+        }
+        payload = {
+            "students": students,
+            "rooms": state["rooms"],
+        }
+        result = gemini_generate_json(
+            prompt + "\n\nPayload:\n" + json.dumps(payload),
+            schema,
+            temperature=0.1,
+        )
+        if result and result.get("student_order"):
+            order = result["student_order"]
+            order_index = {sid: idx for idx, sid in enumerate(order)}
+            sorted_students = sorted(
+                students,
+                key=lambda x: order_index.get(x["id"], len(order_index)),
+            )
+            return {"students": sorted_students}
+
+    # Fallback: sort by id (number)
     sorted_students = sorted(students, key=lambda x: x["id"])
     return {"students": sorted_students}
 

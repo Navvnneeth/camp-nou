@@ -14,14 +14,15 @@ Graph flow:
 """
 
 from typing import List, Dict, Any, TypedDict, Optional, Set, Tuple
+import json
 from langgraph.graph import StateGraph, END
 from sqlalchemy.orm import Session
 from services.dependencies.db import get_db_session
 from services.models.models import (
     Subjects, Faculty, SubjectFacultyMapping, Rooms, Timetable
 )
+from services.graph.gemini_agent import gemini_generate_json, gemini_is_available
 from datetime import datetime
-import random
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -52,6 +53,7 @@ class TimetableState(TypedDict):
     warnings: List[str]
     iteration: int
     retry: int
+    llm_plan: Optional[Dict[str, Any]]
 
 
 # ─── Helper utilities ─────────────────────────────────────────────────────────
@@ -122,6 +124,62 @@ def _find_free_lab(
     return None
 
 
+def _req_key(req: Dict[str, Any]) -> Tuple[int, int, bool]:
+    return (req["subject_id"], req["faculty_id"], bool(req.get("is_lab")))
+
+
+def _normalize_days(days: Optional[List[str]]) -> List[str]:
+    if not days:
+        return list(DAYS)
+    ordered = []
+    for day in days:
+        if day in DAYS and day not in ordered:
+            ordered.append(day)
+    for day in DAYS:
+        if day not in ordered:
+            ordered.append(day)
+    return ordered
+
+
+def _merge_class_order(classes: List[str], preferred: Optional[List[str]]) -> List[str]:
+    if not preferred:
+        return classes
+    ordered = []
+    seen = set()
+    for cn in preferred:
+        if cn in classes and cn not in seen:
+            ordered.append(cn)
+            seen.add(cn)
+    for cn in classes:
+        if cn not in seen:
+            ordered.append(cn)
+    return ordered
+
+
+def _order_reqs(reqs: List[Dict[str, Any]], plan_items: Optional[List[Dict[str, Any]]]):
+    if not plan_items:
+        return reqs, {}
+    ordered = []
+    used_indices = set()
+    preferred_days = {}
+    for item in plan_items:
+        key = (item.get("subject_id"), item.get("faculty_id"), bool(item.get("is_lab")))
+        if key[0] is None or key[1] is None:
+            continue
+        for idx, req in enumerate(reqs):
+            if idx in used_indices:
+                continue
+            if _req_key(req) == key:
+                ordered.append(req)
+                used_indices.add(idx)
+                preferred_days[_req_key(req)] = _normalize_days(item.get("preferred_days"))
+                break
+    for idx, req in enumerate(reqs):
+        if idx not in used_indices:
+            ordered.append(req)
+    return ordered, preferred_days
+
+
 # ─── Node: fetch_all_data ─────────────────────────────────────────────────────
 
 def fetch_all_data(state: TimetableState) -> dict:
@@ -187,6 +245,7 @@ def fetch_all_data(state: TimetableState) -> dict:
             "warnings": [],
             "iteration": 0,
             "retry": 0,
+            "llm_plan": None,
         }
     finally:
         db.close()
@@ -229,6 +288,72 @@ def build_constraints(state: TimetableState) -> dict:
     return {"timetable": timetable}
 
 
+# ─── Node: gemini_plan_timetable ─────────────────────────────────────────────
+
+def gemini_plan_timetable(state: TimetableState) -> dict:
+    warnings = list(state.get("warnings", []))
+    if not gemini_is_available():
+        warnings.append("Gemini API key not set; using heuristic scheduler.")
+        return {"llm_plan": None, "warnings": warnings}
+
+    class_reqs = state.get("timetable", {}).get("__requirements__", {})
+    payload = {
+        "days": DAYS,
+        "slots_per_day": SLOTS_PER_DAY,
+        "lab_duration": LAB_DURATION,
+        "classes": state.get("classes", []),
+        "classrooms": state.get("classrooms", []),
+        "labs": state.get("labs", []),
+        "requirements": class_reqs,
+    }
+    prompt = (
+        "You are a timetable planning agent. "
+        "Return JSON matching the provided schema. "
+        "Use only the subject_id and faculty_id values from the payload. "
+        "For each class, output an ordered list of requirements with preferred_days "
+        "to reduce lab conflicts and faculty overlaps. "
+        "Do not invent subjects, faculty, or classes.\n\nPayload:\n"
+        + json.dumps(payload)
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "class_priorities": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "class_plans": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject_id": {"type": "integer"},
+                            "faculty_id": {"type": "integer"},
+                            "is_lab": {"type": "boolean"},
+                            "hours": {"type": "integer"},
+                            "preferred_days": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["subject_id", "faculty_id", "is_lab", "hours"],
+                    },
+                },
+            },
+        },
+        "required": ["class_priorities", "class_plans"],
+    }
+
+    plan = gemini_generate_json(prompt, schema, temperature=0.2)
+    if not plan:
+        warnings.append("Gemini planning failed; using heuristic scheduler.")
+        return {"llm_plan": None, "warnings": warnings}
+
+    return {"llm_plan": plan}
+
+
 # ─── Node: generate_initial_timetable ─────────────────────────────────────────
 
 def generate_initial_timetable(state: TimetableState) -> dict:
@@ -245,11 +370,14 @@ def generate_initial_timetable(state: TimetableState) -> dict:
     class_reqs = timetable.get("__requirements__", {})
     classrooms = state["classrooms"]
     labs_rooms = state["labs"]
+    plan = state.get("llm_plan") or {}
+    class_order = _merge_class_order(state["classes"], plan.get("class_priorities"))
+    class_plans = plan.get("class_plans", {})
 
     room_schedule: Dict[str, Any] = {}
     faculty_schedule: Dict[str, Any] = {}
     conflicts: List[Dict] = []
-    warnings: List[str] = []
+    warnings: List[str] = list(state.get("warnings", []))
 
     # Initialize timetable slots for each class
     for cn in state["classes"]:
@@ -258,16 +386,18 @@ def generate_initial_timetable(state: TimetableState) -> dict:
             timetable[cn][day] = {}
 
     # ── Phase 1: Schedule LAB periods ──────────────────────────────────────
-    for cn in state["classes"]:
+    for cn in class_order:
         reqs = class_reqs.get(cn, [])
-        lab_reqs = [r for r in reqs if r["is_lab"]]
+        ordered_reqs, preferred_days = _order_reqs(reqs, class_plans.get(cn))
+        lab_reqs = [r for r in ordered_reqs if r["is_lab"]]
         for lr in lab_reqs:
             scheduled_hours = 0
             target = lr["hours"]  # typically 3
             while scheduled_hours < target:
                 placed = False
                 needed = min(LAB_DURATION, target - scheduled_hours)
-                for day in DAYS:
+                days_to_try = preferred_days.get(_req_key(lr), DAYS)
+                for day in days_to_try:
                     if placed:
                         break
                     # Try each starting slot that allows `needed` consecutive
@@ -312,15 +442,17 @@ def generate_initial_timetable(state: TimetableState) -> dict:
                     break
 
     # ── Phase 2: Schedule LECTURE periods ──────────────────────────────────
-    for cn in state["classes"]:
+    for cn in class_order:
         reqs = class_reqs.get(cn, [])
-        lecture_reqs = [r for r in reqs if not r["is_lab"]]
+        ordered_reqs, preferred_days = _order_reqs(reqs, class_plans.get(cn))
+        lecture_reqs = [r for r in ordered_reqs if not r["is_lab"]]
         for lr in lecture_reqs:
             scheduled_hours = 0
             target = lr["hours"]
             while scheduled_hours < target:
                 placed = False
-                for day in DAYS:
+                days_to_try = preferred_days.get(_req_key(lr), DAYS)
+                for day in days_to_try:
                     if placed:
                         break
                     for slot in range(1, SLOTS_PER_DAY + 1):
@@ -618,6 +750,7 @@ workflow = StateGraph(TimetableState)
 
 workflow.add_node("fetch_all_data", fetch_all_data)
 workflow.add_node("build_constraints", build_constraints)
+workflow.add_node("gemini_plan_timetable", gemini_plan_timetable)
 workflow.add_node("generate_initial_timetable", generate_initial_timetable)
 workflow.add_node("resolve_room_conflicts", resolve_room_conflicts)
 workflow.add_node("validate_timetable", validate_timetable)
@@ -625,7 +758,8 @@ workflow.add_node("save_timetable", save_timetable)
 
 workflow.set_entry_point("fetch_all_data")
 workflow.add_edge("fetch_all_data", "build_constraints")
-workflow.add_edge("build_constraints", "generate_initial_timetable")
+workflow.add_edge("build_constraints", "gemini_plan_timetable")
+workflow.add_edge("gemini_plan_timetable", "generate_initial_timetable")
 workflow.add_edge("generate_initial_timetable", "resolve_room_conflicts")
 
 workflow.add_conditional_edges(
@@ -672,6 +806,7 @@ def run_timetable_scheduler() -> dict:
         "warnings": [],
         "iteration": 0,
         "retry": 0,
+        "llm_plan": None,
     }
 
     result = timetable_app.invoke(initial_state)
