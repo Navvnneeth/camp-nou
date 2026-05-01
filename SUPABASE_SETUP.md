@@ -8,7 +8,6 @@ Yes, this project can use Supabase. The backend uses SQLAlchemy with PostgreSQL,
 2. Open **Project Settings > Database**.
 3. Copy the PostgreSQL connection string.
 4. Use the direct connection string for local development, and include `?sslmode=require`.
-
 ## 2. Configure the backend
 
 Create `server/.env`:
