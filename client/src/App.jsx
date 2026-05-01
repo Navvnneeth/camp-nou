@@ -621,6 +621,21 @@ function App() {
             <section className="panel">
               <div className="panel-header">
                 <div>
+                  <h2>Data Intake</h2>
+                  <p>Upload Excel sheets that power the scheduler.</p>
+                </div>
+                <button type="button" className="btn ghost" onClick={refreshClasses}>Refresh Classes</button>
+              </div>
+              <div className="upload-grid">
+                <UploadCard title="Rooms" description="Upload rooms inventory." status={uploads.rooms} onFile={handleFile('rooms')} onUpload={() => handleUpload('rooms', endpoints.roomsUpload)} />
+                <UploadCard title="Students" description="Upload student roster sheets." status={uploads.students} onFile={handleFile('students')} onUpload={() => handleUpload('students', endpoints.studentsUpload)} />
+                <UploadCard title="Subjects + Faculty" description="Upload subject-faculty mappings." status={uploads.subjects} onFile={handleFile('subjects')} onUpload={() => handleUpload('subjects', endpoints.subjectsFacultyUpload)} />
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
                   <h2>Room Inventory</h2>
                   <p>Add rooms manually for booking recommendations and timetable scheduling.</p>
                 </div>
@@ -653,21 +668,6 @@ function App() {
                 {rooms.map((room) => (
                   <span className="room-chip" key={room.id}>{room.name} · {room.capacity} · {room.room_type}</span>
                 ))}
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <h2>Data Intake</h2>
-                  <p>Upload Excel sheets that power the scheduler.</p>
-                </div>
-                <button type="button" className="btn ghost" onClick={refreshClasses}>Refresh Classes</button>
-              </div>
-              <div className="upload-grid">
-                <UploadCard title="Rooms" description="Upload rooms inventory." status={uploads.rooms} onFile={handleFile('rooms')} onUpload={() => handleUpload('rooms', endpoints.roomsUpload)} />
-                <UploadCard title="Students" description="Upload student roster sheets." status={uploads.students} onFile={handleFile('students')} onUpload={() => handleUpload('students', endpoints.studentsUpload)} />
-                <UploadCard title="Subjects + Faculty" description="Upload subject-faculty mappings." status={uploads.subjects} onFile={handleFile('subjects')} onUpload={() => handleUpload('subjects', endpoints.subjectsFacultyUpload)} />
               </div>
             </section>
 
