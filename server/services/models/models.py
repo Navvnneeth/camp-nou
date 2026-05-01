@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Date
 from sqlalchemy.dialects.postgresql import ARRAY
 from services.models.base import Base
 
@@ -73,3 +73,34 @@ class Timetable(Base):
     is_lab_period = Column(Boolean, default=False)
     status = Column(String, default="scheduled")   # "scheduled", "suspended"
     created_at = Column(DateTime)
+
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    role = Column(String, nullable=False)  # "administrator", "faculty", or "club"
+    club_name = Column(String, nullable=True)
+    password_hash = Column(String, nullable=False)
+    password_salt = Column(String, nullable=False)
+    created_at = Column(DateTime)
+
+
+class RoomBooking(Base):
+    __tablename__ = "room_bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_name = Column(String, nullable=False)
+    club_name = Column(String, nullable=False)
+    requested_by_user_id = Column(Integer, ForeignKey("app_users.id"), nullable=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
+    room_name = Column(String, nullable=False)
+    event_date = Column(Date, nullable=False)
+    start_time = Column(String, nullable=False)
+    end_time = Column(String, nullable=False)
+    status = Column(String, default="pending", nullable=False)  # "pending", "approved", "rejected"
+    admin_note = Column(String, nullable=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)

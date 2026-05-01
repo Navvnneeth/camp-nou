@@ -4,7 +4,10 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
-DATABASE_URL = os.getenv("NEON_DB_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DB_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("Set DATABASE_URL or NEON_DB_URL before starting the API")
 
 engine = create_engine(DATABASE_URL)
 

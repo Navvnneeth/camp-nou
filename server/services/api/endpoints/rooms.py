@@ -1,8 +1,27 @@
 from fastapi import UploadFile, File, Depends, HTTPException, APIRouter
 from services.dependencies.db import getDbInvoker, DBInvoker
+from services.models.models import Rooms
 from scripts.rooms import insert_rooms_from_excel
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
+
+
+@router.get("")
+async def list_rooms(
+    db_invoker: DBInvoker = Depends(getDbInvoker),
+):
+    rooms = db_invoker.db.query(Rooms).order_by(Rooms.name).all()
+    return {
+        "rooms": [
+            {
+                "id": room.id,
+                "name": room.name,
+                "capacity": room.capacity,
+                "room_type": room.room_type,
+            }
+            for room in rooms
+        ]
+    }
 
 @router.post("/rooms/upload")
 async def upload_rooms(
