@@ -6,6 +6,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1
 const endpoints = {
   login: '/auth/login',
   rooms: '/rooms',
+  roomRecommendations: '/rooms/recommend',
   roomsUpload: '/rooms/rooms/upload',
   studentsUpload: '/students/students/upload',
   subjectsFacultyUpload: '/subjects-faculty/upload',
@@ -15,6 +16,8 @@ const endpoints = {
   bookings: '/bookings',
   bookingCalendar: '/bookings/calendar',
   bookingStatus: (id) => `/bookings/${id}/status`,
+  bookingRoom: (id) => `/bookings/${id}/room`,
+  bookingAppeal: (id) => `/bookings/${id}/appeal`,
 }
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -233,7 +236,16 @@ function CalendarView({ events }) {
   )
 }
 
-function BookingList({ bookings, onUpdateStatus }) {
+const bookingTone = (status) => {
+  if (status === 'approved') return 'success'
+  if (status === 'rejected' || status === 'overridden') return 'error'
+  if (status === 'appealed') return 'info'
+  return 'idle'
+}
+
+function BookingList({ bookings, rooms = [], mode = 'admin', onUpdateStatus, onChangeRoom, onAppeal }) {
+  const [roomEdits, setRoomEdits] = useState({})
+
   if (!bookings.length) {
     return <p className="muted">No booking notifications yet.</p>
   }
@@ -246,14 +258,49 @@ function BookingList({ bookings, onUpdateStatus }) {
             <strong>{booking.event_name}</strong>
             <span>{booking.club_name} requested {booking.room_name}</span>
             <span>{booking.event_date}, {booking.start_time} - {booking.end_time}</span>
+            {booking.admin_note && <span className="notice-line">{booking.admin_note}</span>}
+            {booking.conflicts?.length > 0 && (
+              <div className="conflict-box">
+                <strong>Clash evaluation</strong>
+                {booking.conflicts.map((conflict) => (
+                  <span key={conflict.id}>{conflict.status}: {conflict.event_name} by {conflict.club_name}</span>
+                ))}
+              </div>
+            )}
           </div>
           <div className="booking-actions">
-            <StatusPill status={booking.status === 'approved' ? 'success' : booking.status === 'rejected' ? 'error' : 'idle'} label={booking.status} />
-            {booking.status === 'pending' && (
+            <StatusPill status={bookingTone(booking.status)} label={booking.status} />
+            {mode === 'admin' && booking.status === 'pending' && (
               <>
                 <button type="button" className="btn primary compact" onClick={() => onUpdateStatus(booking.id, 'approved')}>Accept</button>
                 <button type="button" className="btn ghost compact" onClick={() => onUpdateStatus(booking.id, 'rejected')}>Reject</button>
               </>
+            )}
+            {mode === 'admin' && booking.status === 'appealed' && (
+              <button type="button" className="btn ghost compact" onClick={() => onUpdateStatus(booking.id, 'rejected')}>Close Appeal</button>
+            )}
+            {mode === 'admin' && ['approved', 'pending', 'overridden', 'appealed'].includes(booking.status) && rooms.length > 0 && (
+              <div className="room-change">
+                <select
+                  value={roomEdits[booking.id] || booking.room_id || ''}
+                  onChange={(event) => setRoomEdits((prev) => ({ ...prev, [booking.id]: event.target.value }))}
+                >
+                  <option value="">Change room</option>
+                  {rooms.map((room) => (
+                    <option value={room.id} key={room.id}>{room.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn ghost compact"
+                  onClick={() => onChangeRoom(booking.id, roomEdits[booking.id] || booking.room_id)}
+                >
+                  Update Room
+                </button>
+              </div>
+            )}
+            {mode !== 'admin' && booking.status === 'overridden' && (
+              <button type="button" className="btn primary compact" onClick={() => onAppeal(booking.id)}>Raise Appeal</button>
             )}
           </div>
         </article>
@@ -288,11 +335,17 @@ function App() {
     timetable: null,
   })
   const [rooms, setRooms] = useState([])
+  const [roomForm, setRoomForm] = useState({ name: '', capacity: '', room_type: 'classroom' })
+  const [roomCreateStatus, setRoomCreateStatus] = useState({ status: 'idle', message: 'Add rooms manually or upload Excel.' })
   const [bookings, setBookings] = useState([])
   const [calendarEvents, setCalendarEvents] = useState([])
   const [bookingStatus, setBookingStatus] = useState({ status: 'idle', message: 'Ready for room requests.' })
+  const [recommendationStatus, setRecommendationStatus] = useState({ status: 'idle', message: 'AI can suggest rooms after you enter event details.' })
+  const [recommendations, setRecommendations] = useState([])
   const [bookingForm, setBookingForm] = useState({
     event_name: '',
+    expected_attendees: '',
+    equipment_needs: '',
     room_id: '',
     room_name: '',
     event_date: '',
@@ -300,7 +353,7 @@ function App() {
     end_time: '',
   })
 
-  const pendingBookings = bookings.filter((booking) => booking.status === 'pending')
+  const pendingBookings = bookings.filter((booking) => booking.status === 'pending' || booking.status === 'appealed')
   const isAdmin = user?.role === 'administrator'
   const isFaculty = user?.role === 'faculty'
   const isClub = user?.role === 'club'
@@ -345,13 +398,17 @@ function App() {
   }, [])
 
   const refreshBookings = useCallback(async () => {
+    if (!user) return
     try {
-      const data = await request(endpoints.bookings)
+      const path = user.role === 'administrator'
+        ? endpoints.bookings
+        : `${endpoints.bookings}?requested_by_user_id=${user.id}`
+      const data = await request(path)
       setBookings(data?.bookings || [])
     } catch {
       setBookings([])
     }
-  }, [])
+  }, [user])
 
   const refreshCalendar = useCallback(async () => {
     try {
@@ -370,9 +427,7 @@ function App() {
       refreshClasses()
       refreshRooms()
       refreshCalendar()
-      if (user.role === 'administrator') {
-        refreshBookings()
-      }
+      refreshBookings()
     }, 0)
 
     return () => window.clearTimeout(timer)
@@ -404,6 +459,27 @@ function App() {
       if (key === 'rooms') refreshRooms()
     } catch (error) {
       updateUpload(key, { status: 'error', message: error.message })
+    }
+  }
+
+  const handleAddRoom = async (event) => {
+    event.preventDefault()
+    setRoomCreateStatus({ status: 'loading', message: 'Adding room...' })
+
+    try {
+      const data = await request(endpoints.rooms, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: roomForm.name,
+          capacity: Number(roomForm.capacity),
+          room_type: roomForm.room_type,
+        }),
+      })
+      setRoomCreateStatus({ status: 'success', message: data?.message || 'Room added.' })
+      setRoomForm({ name: '', capacity: '', room_type: 'classroom' })
+      refreshRooms()
+    } catch (error) {
+      setRoomCreateStatus({ status: 'error', message: error.message })
     }
   }
 
@@ -490,8 +566,9 @@ function App() {
     const payload = {
       ...bookingForm,
       room_id: bookingForm.room_id ? Number(bookingForm.room_id) : null,
-      club_name: user.club_name || user.name,
+      club_name: isFaculty ? user.name : user.club_name || user.name,
       requested_by_user_id: user.id,
+      requester_role: user.role,
     }
 
     try {
@@ -500,10 +577,55 @@ function App() {
         body: JSON.stringify(payload),
       })
       setBookingStatus({ status: 'success', message: data?.message || 'Request sent.' })
-      setBookingForm({ event_name: '', room_id: '', room_name: '', event_date: '', start_time: '', end_time: '' })
+      setBookingForm({
+        event_name: '',
+        expected_attendees: '',
+        equipment_needs: '',
+        room_id: '',
+        room_name: '',
+        event_date: '',
+        start_time: '',
+        end_time: '',
+      })
+      setRecommendations([])
+      refreshBookings()
     } catch (error) {
       setBookingStatus({ status: 'error', message: error.message })
     }
+  }
+
+  const getRoomRecommendations = async () => {
+    if (!bookingForm.event_name || !bookingForm.expected_attendees || !bookingForm.event_date || !bookingForm.start_time || !bookingForm.end_time) {
+      setRecommendationStatus({ status: 'error', message: 'Enter event name, attendees, date, and time first.' })
+      return
+    }
+
+    setRecommendationStatus({ status: 'loading', message: 'Finding the best rooms...' })
+    try {
+      const data = await request(endpoints.roomRecommendations, {
+        method: 'POST',
+        body: JSON.stringify({
+          event_name: bookingForm.event_name,
+          expected_attendees: Number(bookingForm.expected_attendees),
+          event_date: bookingForm.event_date,
+          start_time: bookingForm.start_time,
+          end_time: bookingForm.end_time,
+          equipment_needs: bookingForm.equipment_needs,
+        }),
+      })
+      setRecommendations(data?.recommendations || [])
+      setRecommendationStatus({
+        status: 'success',
+        message: data?.ai_used ? 'Gemini ranked the available rooms.' : 'Fallback ranking used because Gemini was unavailable.',
+      })
+    } catch (error) {
+      setRecommendationStatus({ status: 'error', message: error.message })
+    }
+  }
+
+  const chooseRecommendedRoom = (roomId) => {
+    setBookingForm((prev) => ({ ...prev, room_id: String(roomId), room_name: '' }))
+    setBookingStatus({ status: 'picking', message: 'Recommended room selected. Submit to request admin approval.' })
   }
 
   const updateBookingStatus = async (bookingId, status) => {
@@ -516,6 +638,35 @@ function App() {
       refreshCalendar()
     } catch (error) {
       setApiStatus({ status: 'error', message: error.message })
+    }
+  }
+
+  const updateBookingRoom = async (bookingId, roomId) => {
+    if (!roomId) {
+      setApiStatus({ status: 'error', message: 'Choose a room before updating.' })
+      return
+    }
+
+    try {
+      await request(endpoints.bookingRoom(bookingId), {
+        method: 'PATCH',
+        body: JSON.stringify({ room_id: Number(roomId) }),
+      })
+      setApiStatus({ status: 'success', message: 'Booking room updated.' })
+      refreshBookings()
+      refreshCalendar()
+    } catch (error) {
+      setApiStatus({ status: 'error', message: error.message })
+    }
+  }
+
+  const appealBooking = async (bookingId) => {
+    try {
+      const data = await request(endpoints.bookingAppeal(bookingId), { method: 'PATCH' })
+      setBookingStatus({ status: 'success', message: data?.message || 'Appeal sent to admin.' })
+      refreshBookings()
+    } catch (error) {
+      setBookingStatus({ status: 'error', message: error.message })
     }
   }
 
@@ -564,6 +715,44 @@ function App() {
             <section className="panel">
               <div className="panel-header">
                 <div>
+                  <h2>Room Inventory</h2>
+                  <p>Add rooms manually for booking recommendations and timetable scheduling.</p>
+                </div>
+                <div className="inline-status">
+                  <StatusPill status={roomCreateStatus.status} />
+                  <span className="status-text">{roomCreateStatus.message}</span>
+                </div>
+              </div>
+              <form className="room-admin-form" onSubmit={handleAddRoom}>
+                <label className="field">
+                  <span>Room name</span>
+                  <input value={roomForm.name} onChange={(event) => setRoomForm((prev) => ({ ...prev, name: event.target.value }))} required />
+                </label>
+                <label className="field">
+                  <span>Capacity</span>
+                  <input type="number" min="1" value={roomForm.capacity} onChange={(event) => setRoomForm((prev) => ({ ...prev, capacity: event.target.value }))} required />
+                </label>
+                <label className="field">
+                  <span>Room type</span>
+                  <select value={roomForm.room_type} onChange={(event) => setRoomForm((prev) => ({ ...prev, room_type: event.target.value }))}>
+                    <option value="classroom">Classroom</option>
+                    <option value="lab">Lab</option>
+                    <option value="seminar">Seminar</option>
+                    <option value="auditorium">Auditorium</option>
+                  </select>
+                </label>
+                <button type="submit" className="btn primary">Add Room</button>
+              </form>
+              <div className="room-chip-row">
+                {rooms.map((room) => (
+                  <span className="room-chip" key={room.id}>{room.name} · {room.capacity} · {room.room_type}</span>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
                   <h2>Scheduler</h2>
                   <p>Only administrators can generate timetables.</p>
                 </div>
@@ -599,11 +788,17 @@ function App() {
               <div className="panel-header">
                 <div>
                   <h2>Booking Notifications</h2>
-                  <p>Accepting a request publishes it to the club calendar.</p>
+                  <p>Evaluate clashes, approve faculty priority requests, and change rooms when needed.</p>
                 </div>
                 <button type="button" className="btn ghost" onClick={refreshBookings}>Refresh</button>
               </div>
-              <BookingList bookings={bookings} onUpdateStatus={updateBookingStatus} />
+              <BookingList
+                bookings={bookings}
+                rooms={rooms}
+                mode="admin"
+                onUpdateStatus={updateBookingStatus}
+                onChangeRoom={updateBookingRoom}
+              />
             </section>
           </>
         )}
@@ -642,12 +837,12 @@ function App() {
           </section>
         )}
 
-        {isClub && (
+        {(isClub || isFaculty) && (
           <section className="panel">
             <div className="panel-header">
               <div>
-                <h2>Room Booking</h2>
-                <p>Requests are sent to the administrator for approval.</p>
+                <h2>{isFaculty ? 'Faculty Room Booking' : 'AI Room Booking'}</h2>
+                <p>{isFaculty ? 'Faculty requests are evaluated by admin with higher priority.' : 'Enter event details for a recommendation, or choose a room manually.'}</p>
               </div>
               <div className="inline-status">
                 <StatusPill status={bookingStatus.status} />
@@ -659,6 +854,14 @@ function App() {
               <label className="field">
                 <span>Event name</span>
                 <input value={bookingForm.event_name} onChange={(event) => setBookingForm((prev) => ({ ...prev, event_name: event.target.value }))} required />
+              </label>
+              <label className="field">
+                <span>Expected attendees</span>
+                <input type="number" min="1" value={bookingForm.expected_attendees} onChange={(event) => setBookingForm((prev) => ({ ...prev, expected_attendees: event.target.value }))} required />
+              </label>
+              <label className="field wide">
+                <span>Equipment needs</span>
+                <input value={bookingForm.equipment_needs} onChange={(event) => setBookingForm((prev) => ({ ...prev, equipment_needs: event.target.value }))} placeholder="Projector, speakers, lab systems..." />
               </label>
               <label className="field">
                 <span>Room</span>
@@ -685,8 +888,45 @@ function App() {
                 <span>End time</span>
                 <input type="time" value={bookingForm.end_time} onChange={(event) => setBookingForm((prev) => ({ ...prev, end_time: event.target.value }))} required />
               </label>
+              <button type="button" className="btn ghost" onClick={getRoomRecommendations}>Recommend Rooms</button>
               <button type="submit" className="btn primary">Request Booking</button>
             </form>
+
+            <div className="recommendation-status">
+              <StatusPill status={recommendationStatus.status} />
+              <span className="status-text">{recommendationStatus.message}</span>
+            </div>
+
+            {recommendations.length > 0 && (
+              <div className="recommendation-grid">
+                {recommendations.map((room) => (
+                  <article className={`recommendation-card ${String(room.id) === bookingForm.room_id ? 'selected' : ''}`} key={room.id}>
+                    <div>
+                      <strong>{room.name}</strong>
+                      <span>{room.room_type} · {room.capacity} seats · score {room.score}</span>
+                    </div>
+                    <p>{room.reason}</p>
+                    {room.pending_conflicts > 0 && (
+                      <span className="pending-note">{room.pending_conflicts} pending request at this time</span>
+                    )}
+                    <button type="button" className="btn primary compact" onClick={() => chooseRecommendedRoom(room.id)}>Use This Room</button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {(isClub || isFaculty) && (
+          <section className="panel full">
+            <div className="panel-header">
+              <div>
+                <h2>My Booking Updates</h2>
+                <p>Track approvals, overrides, and appeals for your room requests.</p>
+              </div>
+              <button type="button" className="btn ghost" onClick={refreshBookings}>Refresh Updates</button>
+            </div>
+            <BookingList bookings={bookings} mode="user" onAppeal={appealBooking} />
           </section>
         )}
 
