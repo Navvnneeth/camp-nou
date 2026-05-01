@@ -16,6 +16,8 @@ const endpoints = {
   bookings: '/bookings',
   bookingCalendar: '/bookings/calendar',
   bookingStatus: (id) => `/bookings/${id}/status`,
+  bookingRoom: (id) => `/bookings/${id}/room`,
+  bookingAppeal: (id) => `/bookings/${id}/appeal`,
 }
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -234,7 +236,16 @@ function CalendarView({ events }) {
   )
 }
 
-function BookingList({ bookings, onUpdateStatus }) {
+const bookingTone = (status) => {
+  if (status === 'approved') return 'success'
+  if (status === 'rejected' || status === 'overridden') return 'error'
+  if (status === 'appealed') return 'info'
+  return 'idle'
+}
+
+function BookingList({ bookings, rooms = [], mode = 'admin', onUpdateStatus, onChangeRoom, onAppeal }) {
+  const [roomEdits, setRoomEdits] = useState({})
+
   if (!bookings.length) {
     return <p className="muted">No booking notifications yet.</p>
   }
@@ -247,14 +258,49 @@ function BookingList({ bookings, onUpdateStatus }) {
             <strong>{booking.event_name}</strong>
             <span>{booking.club_name} requested {booking.room_name}</span>
             <span>{booking.event_date}, {booking.start_time} - {booking.end_time}</span>
+            {booking.admin_note && <span className="notice-line">{booking.admin_note}</span>}
+            {booking.conflicts?.length > 0 && (
+              <div className="conflict-box">
+                <strong>Clash evaluation</strong>
+                {booking.conflicts.map((conflict) => (
+                  <span key={conflict.id}>{conflict.status}: {conflict.event_name} by {conflict.club_name}</span>
+                ))}
+              </div>
+            )}
           </div>
           <div className="booking-actions">
-            <StatusPill status={booking.status === 'approved' ? 'success' : booking.status === 'rejected' ? 'error' : 'idle'} label={booking.status} />
-            {booking.status === 'pending' && (
+            <StatusPill status={bookingTone(booking.status)} label={booking.status} />
+            {mode === 'admin' && booking.status === 'pending' && (
               <>
                 <button type="button" className="btn primary compact" onClick={() => onUpdateStatus(booking.id, 'approved')}>Accept</button>
                 <button type="button" className="btn ghost compact" onClick={() => onUpdateStatus(booking.id, 'rejected')}>Reject</button>
               </>
+            )}
+            {mode === 'admin' && booking.status === 'appealed' && (
+              <button type="button" className="btn ghost compact" onClick={() => onUpdateStatus(booking.id, 'rejected')}>Close Appeal</button>
+            )}
+            {mode === 'admin' && ['approved', 'pending', 'overridden', 'appealed'].includes(booking.status) && rooms.length > 0 && (
+              <div className="room-change">
+                <select
+                  value={roomEdits[booking.id] || booking.room_id || ''}
+                  onChange={(event) => setRoomEdits((prev) => ({ ...prev, [booking.id]: event.target.value }))}
+                >
+                  <option value="">Change room</option>
+                  {rooms.map((room) => (
+                    <option value={room.id} key={room.id}>{room.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn ghost compact"
+                  onClick={() => onChangeRoom(booking.id, roomEdits[booking.id] || booking.room_id)}
+                >
+                  Update Room
+                </button>
+              </div>
+            )}
+            {mode !== 'admin' && booking.status === 'overridden' && (
+              <button type="button" className="btn primary compact" onClick={() => onAppeal(booking.id)}>Raise Appeal</button>
             )}
           </div>
         </article>
@@ -307,7 +353,7 @@ function App() {
     end_time: '',
   })
 
-  const pendingBookings = bookings.filter((booking) => booking.status === 'pending')
+  const pendingBookings = bookings.filter((booking) => booking.status === 'pending' || booking.status === 'appealed')
   const isAdmin = user?.role === 'administrator'
   const isFaculty = user?.role === 'faculty'
   const isClub = user?.role === 'club'
@@ -352,13 +398,17 @@ function App() {
   }, [])
 
   const refreshBookings = useCallback(async () => {
+    if (!user) return
     try {
-      const data = await request(endpoints.bookings)
+      const path = user.role === 'administrator'
+        ? endpoints.bookings
+        : `${endpoints.bookings}?requested_by_user_id=${user.id}`
+      const data = await request(path)
       setBookings(data?.bookings || [])
     } catch {
       setBookings([])
     }
-  }, [])
+  }, [user])
 
   const refreshCalendar = useCallback(async () => {
     try {
@@ -377,9 +427,7 @@ function App() {
       refreshClasses()
       refreshRooms()
       refreshCalendar()
-      if (user.role === 'administrator') {
-        refreshBookings()
-      }
+      refreshBookings()
     }, 0)
 
     return () => window.clearTimeout(timer)
@@ -518,8 +566,9 @@ function App() {
     const payload = {
       ...bookingForm,
       room_id: bookingForm.room_id ? Number(bookingForm.room_id) : null,
-      club_name: user.club_name || user.name,
+      club_name: isFaculty ? user.name : user.club_name || user.name,
       requested_by_user_id: user.id,
+      requester_role: user.role,
     }
 
     try {
@@ -539,6 +588,7 @@ function App() {
         end_time: '',
       })
       setRecommendations([])
+      refreshBookings()
     } catch (error) {
       setBookingStatus({ status: 'error', message: error.message })
     }
@@ -588,6 +638,35 @@ function App() {
       refreshCalendar()
     } catch (error) {
       setApiStatus({ status: 'error', message: error.message })
+    }
+  }
+
+  const updateBookingRoom = async (bookingId, roomId) => {
+    if (!roomId) {
+      setApiStatus({ status: 'error', message: 'Choose a room before updating.' })
+      return
+    }
+
+    try {
+      await request(endpoints.bookingRoom(bookingId), {
+        method: 'PATCH',
+        body: JSON.stringify({ room_id: Number(roomId) }),
+      })
+      setApiStatus({ status: 'success', message: 'Booking room updated.' })
+      refreshBookings()
+      refreshCalendar()
+    } catch (error) {
+      setApiStatus({ status: 'error', message: error.message })
+    }
+  }
+
+  const appealBooking = async (bookingId) => {
+    try {
+      const data = await request(endpoints.bookingAppeal(bookingId), { method: 'PATCH' })
+      setBookingStatus({ status: 'success', message: data?.message || 'Appeal sent to admin.' })
+      refreshBookings()
+    } catch (error) {
+      setBookingStatus({ status: 'error', message: error.message })
     }
   }
 
@@ -709,11 +788,17 @@ function App() {
               <div className="panel-header">
                 <div>
                   <h2>Booking Notifications</h2>
-                  <p>Accepting a request publishes it to the club calendar.</p>
+                  <p>Evaluate clashes, approve faculty priority requests, and change rooms when needed.</p>
                 </div>
                 <button type="button" className="btn ghost" onClick={refreshBookings}>Refresh</button>
               </div>
-              <BookingList bookings={bookings} onUpdateStatus={updateBookingStatus} />
+              <BookingList
+                bookings={bookings}
+                rooms={rooms}
+                mode="admin"
+                onUpdateStatus={updateBookingStatus}
+                onChangeRoom={updateBookingRoom}
+              />
             </section>
           </>
         )}
@@ -752,12 +837,12 @@ function App() {
           </section>
         )}
 
-        {isClub && (
+        {(isClub || isFaculty) && (
           <section className="panel">
             <div className="panel-header">
               <div>
-                <h2>AI Room Booking</h2>
-                <p>Enter event details for a recommendation, or choose a room manually.</p>
+                <h2>{isFaculty ? 'Faculty Room Booking' : 'AI Room Booking'}</h2>
+                <p>{isFaculty ? 'Faculty requests are evaluated by admin with higher priority.' : 'Enter event details for a recommendation, or choose a room manually.'}</p>
               </div>
               <div className="inline-status">
                 <StatusPill status={bookingStatus.status} />
@@ -829,6 +914,19 @@ function App() {
                 ))}
               </div>
             )}
+          </section>
+        )}
+
+        {(isClub || isFaculty) && (
+          <section className="panel full">
+            <div className="panel-header">
+              <div>
+                <h2>My Booking Updates</h2>
+                <p>Track approvals, overrides, and appeals for your room requests.</p>
+              </div>
+              <button type="button" className="btn ghost" onClick={refreshBookings}>Refresh Updates</button>
+            </div>
+            <BookingList bookings={bookings} mode="user" onAppeal={appealBooking} />
           </section>
         )}
 

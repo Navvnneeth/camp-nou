@@ -603,6 +603,42 @@
   flex-wrap: wrap;
 }
 
+.notice-line {
+  color: var(--accent-3) !important;
+}
+
+.conflict-box {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 122, 89, 0.35);
+  background: rgba(255, 122, 89, 0.1);
+}
+
+.conflict-box strong {
+  color: var(--accent-3);
+}
+
+.room-change {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.room-change select {
+  min-height: 34px;
+  max-width: 180px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.3);
+}
+
 .booking-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
