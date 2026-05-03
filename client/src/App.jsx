@@ -10,9 +10,12 @@ const endpoints = {
   roomsUpload: '/rooms/rooms/upload',
   studentsUpload: '/students/students/upload',
   subjectsFacultyUpload: '/subjects-faculty/upload',
-  generateTimetable: '/timetable/generate',
-  allTimetables: '/timetable/all',
-  classTimetable: (name) => `/timetable/${encodeURIComponent(name)}`,
+  generateTimetable: (year) => `/timetable/generate${year ? `?academic_year=${year}` : ''}`,
+  allTimetables: (year) => `/timetable/all${year ? `?academic_year=${year}` : ''}`,
+  classTimetable: (name, year) => `/timetable/${encodeURIComponent(name)}${year ? `?academic_year=${year}` : ''}`,
+  resetTimetableData: (includeRooms = false, includeBookings = false) => (
+    `/timetable/admin/reset?include_rooms=${includeRooms}&include_bookings=${includeBookings}`
+  ),
   bookings: '/bookings',
   bookingCalendar: '/bookings/calendar',
   bookingStatus: (id) => `/bookings/${id}/status`,
@@ -22,6 +25,13 @@ const endpoints = {
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const SLOTS = ['1', '2', '3', '4', '5', '6']
+const YEARS = [
+  { value: '', label: 'All years' },
+  { value: '1', label: '1st Year' },
+  { value: '2', label: '2nd Year' },
+  { value: '3', label: '3rd Year' },
+  { value: '4', label: '4th Year' },
+]
 
 const roleLabels = {
   administrator: 'Administrator',
@@ -326,6 +336,8 @@ function App() {
   })
   const [allClasses, setAllClasses] = useState([])
   const [allStatus, setAllStatus] = useState({ status: 'idle', message: '' })
+  const [selectedYear, setSelectedYear] = useState('')
+  const [resetStatus, setResetStatus] = useState({ status: 'idle', message: 'Reset before uploading a completely new dataset.' })
   const [selectedClass, setSelectedClass] = useState('')
   const [manualClass, setManualClass] = useState('')
   const [classView, setClassView] = useState({
@@ -368,25 +380,30 @@ function App() {
   const checkApi = useCallback(async () => {
     setApiStatus({ status: 'loading', message: 'Checking connectivity...' })
     try {
-      await request(endpoints.allTimetables)
+      await request(endpoints.allTimetables(selectedYear))
       setApiStatus({ status: 'success', message: 'Backend reachable.' })
     } catch (error) {
       setApiStatus({ status: 'error', message: error.message })
     }
-  }, [])
+  }, [selectedYear])
 
   const refreshClasses = useCallback(async () => {
     setAllStatus({ status: 'loading', message: 'Loading classes...' })
     try {
-      const data = await request(endpoints.allTimetables)
+      const data = await request(endpoints.allTimetables(selectedYear))
       const classes = Object.keys(data || {}).sort()
       setAllClasses(classes)
       setSelectedClass((prev) => (classes.includes(prev) ? prev : ''))
-      setAllStatus({ status: 'success', message: classes.length ? 'Classes loaded.' : 'No timetables yet.' })
+      setAllStatus({
+        status: 'success',
+        message: classes.length
+          ? `Classes loaded${selectedYear ? ` for year ${selectedYear}` : ''}.`
+          : `No timetables yet${selectedYear ? ` for year ${selectedYear}` : ''}.`,
+      })
     } catch (error) {
       setAllStatus({ status: 'error', message: error.message })
     }
-  }, [])
+  }, [selectedYear])
 
   const refreshRooms = useCallback(async () => {
     try {
@@ -484,9 +501,14 @@ function App() {
   }
 
   const handleGenerate = async () => {
-    setGeneration({ status: 'loading', message: 'Generating timetable...', warnings: [], classes: [] })
+    setGeneration({
+      status: 'loading',
+      message: `Generating timetable${selectedYear ? ` for year ${selectedYear}` : ''}...`,
+      warnings: [],
+      classes: [],
+    })
     try {
-      const data = await request(endpoints.generateTimetable, { method: 'POST' })
+      const data = await request(endpoints.generateTimetable(selectedYear), { method: 'POST' })
       setGeneration({
         status: 'success',
         message: data?.message || 'Generation completed.',
@@ -499,6 +521,26 @@ function App() {
     }
   }
 
+  const resetAcademicData = async (includeRooms = false, includeBookings = false) => {
+    const scope = includeRooms || includeBookings ? 'everything including rooms/bookings' : 'uploaded academic data and timetables'
+    const ok = window.confirm(`This will delete ${scope}. Continue?`)
+    if (!ok) return
+
+    setResetStatus({ status: 'loading', message: 'Resetting data...' })
+    try {
+      const data = await request(endpoints.resetTimetableData(includeRooms, includeBookings), { method: 'DELETE' })
+      setResetStatus({ status: 'success', message: data?.message || 'Data reset complete.' })
+      setAllClasses([])
+      setClassView({ status: 'idle', message: 'Pick a class to preview the timetable.', className: '', timetable: null })
+      refreshRooms()
+      refreshClasses()
+      refreshBookings()
+      refreshCalendar()
+    } catch (error) {
+      setResetStatus({ status: 'error', message: error.message })
+    }
+  }
+
   const loadClassTimetable = async (className) => {
     if (!className) {
       setClassView({ status: 'error', message: 'Enter or select a class name.', className: '', timetable: null })
@@ -506,7 +548,7 @@ function App() {
     }
     setClassView({ status: 'loading', message: 'Loading timetable...', className, timetable: null })
     try {
-      const data = await request(endpoints.classTimetable(className))
+      const data = await request(endpoints.classTimetable(className, selectedYear))
       setClassView({
         status: 'success',
         message: 'Timetable loaded.',
@@ -710,6 +752,16 @@ function App() {
                 <UploadCard title="Students" description="Upload student roster sheets." status={uploads.students} onFile={handleFile('students')} onUpload={() => handleUpload('students', endpoints.studentsUpload)} />
                 <UploadCard title="Subjects + Faculty" description="Upload subject-faculty mappings." status={uploads.subjects} onFile={handleFile('subjects')} onUpload={() => handleUpload('subjects', endpoints.subjectsFacultyUpload)} />
               </div>
+              <div className="reset-strip">
+                <div className="inline-status">
+                  <StatusPill status={resetStatus.status} />
+                  <span className="status-text">{resetStatus.message}</span>
+                </div>
+                <div className="reset-actions">
+                  <button type="button" className="btn ghost" onClick={() => resetAcademicData(false, false)}>Reset Academic Data</button>
+                  <button type="button" className="btn danger" onClick={() => resetAcademicData(true, true)}>Reset Everything</button>
+                </div>
+              </div>
             </section>
 
             <section className="panel">
@@ -760,6 +812,14 @@ function App() {
               </div>
               <div className="scheduler-body">
                 <div className="scheduler-actions">
+                  <label className="field compact-field">
+                    <span>Batch year</span>
+                    <select value={selectedYear} onChange={(event) => setSelectedYear(event.target.value)}>
+                      {YEARS.map((year) => (
+                        <option value={year.value} key={year.label}>{year.label}</option>
+                      ))}
+                    </select>
+                  </label>
                   <button type="button" className="btn primary" onClick={handleGenerate}>Generate Timetable</button>
                   <p className="status-text">{generation.message}</p>
                 </div>
@@ -817,6 +877,8 @@ function App() {
             </div>
 
             <TimetableControls
+              selectedYear={selectedYear}
+              setSelectedYear={setSelectedYear}
               classes={allClasses}
               selectedClass={selectedClass}
               setSelectedClass={setSelectedClass}
@@ -963,6 +1025,8 @@ function UploadCard({ title, description, status, onFile, onUpload }) {
 }
 
 function TimetableControls({
+  selectedYear,
+  setSelectedYear,
   classes,
   selectedClass,
   setSelectedClass,
@@ -974,6 +1038,12 @@ function TimetableControls({
 }) {
   return (
     <div className="explorer-controls">
+      <label className="field">
+        <span>Batch year</span>
+        <select value={selectedYear} onChange={(event) => setSelectedYear(event.target.value)}>
+          {YEARS.map((year) => <option key={year.label} value={year.value}>{year.label}</option>)}
+        </select>
+      </label>
       <label className="field">
         <span>Pick a class</span>
         <select value={selectedClass} onChange={(event) => setSelectedClass(event.target.value)}>

@@ -14,6 +14,7 @@ Graph flow:
 
 from typing import List, Dict, Any, TypedDict, Optional, Set, Tuple
 from langgraph.graph import StateGraph, END
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from services.dependencies.db import get_db_session
 from services.models.models import (
@@ -31,6 +32,10 @@ load_dotenv()
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 SLOTS_PER_DAY = 6          # 1-hour slots numbered 1..6
 LAB_DURATION = 3           # lab periods occupy 3 consecutive slots
+TARGET_WEEKLY_HOURS = 20
+TARGET_LAB_BLOCKS = 2
+TARGET_LAB_HOURS = TARGET_LAB_BLOCKS * LAB_DURATION
+TARGET_LECTURE_HOURS = TARGET_WEEKLY_HOURS - TARGET_LAB_HOURS
 
 
 # ─── State ────────────────────────────────────────────────────────────────────
@@ -40,6 +45,7 @@ class TimetableState(TypedDict):
     classes: List[str]
     subjects: List[Dict[str, Any]]
     faculty_mappings: List[Dict[str, Any]]
+    class_years: Dict[str, Optional[int]]
     classrooms: List[Dict[str, Any]]        # rooms where room_type = "classroom"
     labs: List[Dict[str, Any]]              # rooms where room_type = "lab"
 
@@ -47,12 +53,16 @@ class TimetableState(TypedDict):
     timetable: Dict[str, Any]
     room_schedule: Dict[str, Any]           # room_id_str -> day -> slot_str -> class
     faculty_schedule: Dict[str, Any]        # faculty_id_str -> day -> slot_str -> class
+    fixed_timetable_entries: List[Dict[str, Any]]
 
     # Conflict tracking
     conflicts: List[Dict[str, Any]]
     warnings: List[str]
     iteration: int
     retry: int
+    academic_year: Optional[int]
+    is_feasible: bool
+    is_valid: bool
 
 
 # ─── Helper utilities ─────────────────────────────────────────────────────────
@@ -90,6 +100,59 @@ def _book_faculty(faculty_schedule: dict, fac_id: int, day: str, slot: int, clas
     fk = _faculty_key(fac_id)
     faculty_schedule.setdefault(fk, {}).setdefault(day, {})[_slot_key(slot)] = class_name
 
+def _schedule_class_name(class_name: str, academic_year: Optional[int], target_year: Optional[int]) -> str:
+    if target_year or not academic_year:
+        return class_name
+
+    prefix = f"y{academic_year}"
+    normalized = class_name.lower().replace(" ", "")
+    if normalized.startswith(prefix):
+        return class_name
+    return f"Y{academic_year}-{class_name}"
+
+def _normalize_lecture_hours(lecture_reqs: List[Dict[str, Any]], target_hours: int) -> List[Dict[str, Any]]:
+    if not lecture_reqs or target_hours <= 0:
+        return []
+
+    normalized = [{**req, "hours": max(1, int(req.get("hours", 1) or 1))} for req in lecture_reqs]
+    total = sum(req["hours"] for req in normalized)
+
+    index = 0
+    while total < target_hours:
+        normalized[index % len(normalized)]["hours"] += 1
+        total += 1
+        index += 1
+
+    while total > target_hours and any(req["hours"] > 1 for req in normalized):
+        candidate = max(normalized, key=lambda req: req["hours"])
+        candidate["hours"] -= 1
+        total -= 1
+
+    if total > target_hours:
+        trimmed = []
+        remaining = target_hours
+        for req in normalized:
+            if remaining <= 0:
+                break
+            hours = min(req["hours"], remaining)
+            trimmed.append({**req, "hours": hours})
+            remaining -= hours
+        normalized = trimmed
+
+    return [req for req in normalized if req["hours"] > 0]
+
+def _normalize_lab_hours(lab_reqs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not lab_reqs:
+        return []
+
+    if len(lab_reqs) == 1:
+        return [{**lab_reqs[0], "hours": TARGET_LAB_HOURS}]
+
+    return [
+        {**lab_reqs[0], "hours": LAB_DURATION},
+        {**lab_reqs[1], "hours": LAB_DURATION},
+    ]
+
 
 # ─── Node: fetch_all_data ─────────────────────────────────────────────────────
 
@@ -99,8 +162,36 @@ def fetch_all_data(state: TimetableState) -> dict:
     db: Session = get_db_session()
     try:
         subjects = db.query(Subjects).all()
-        mappings = db.query(SubjectFacultyMapping).all()
+        academic_year = state.get("academic_year")
+        mappings_query = db.query(SubjectFacultyMapping)
+        if academic_year:
+            mappings_query = mappings_query.filter(SubjectFacultyMapping.academic_year == academic_year)
+        mappings = mappings_query.all()
         rooms = db.query(Rooms).all()
+        fixed_timetable_entries = []
+        if academic_year:
+            fixed_entries = (
+                db.query(Timetable)
+                .filter(
+                    or_(
+                        Timetable.academic_year != academic_year,
+                        Timetable.academic_year.is_(None),
+                    )
+                )
+                .all()
+            )
+            fixed_timetable_entries = [
+                {
+                    "class_name": entry.class_name,
+                    "academic_year": entry.academic_year,
+                    "day": entry.day,
+                    "slot": entry.slot,
+                    "room_id": entry.room_id,
+                    "faculty_id": entry.faculty_id,
+                }
+                for entry in fixed_entries
+                if entry.status != "suspended"
+            ]
 
         subjects_data = [
             {
@@ -112,15 +203,18 @@ def fetch_all_data(state: TimetableState) -> dict:
             for s in subjects
         ]
 
-        mappings_data = [
-            {
+        mappings_data = []
+        class_years = {}
+        for m in mappings:
+            class_name = _schedule_class_name(m.class_name, m.academic_year, academic_year)
+            mappings_data.append({
                 "id": m.id,
                 "subject_id": m.subject_id,
                 "faculty_id": m.faculty_id,
-                "class_name": m.class_name,
-            }
-            for m in mappings
-        ]
+                "class_name": class_name,
+                "academic_year": m.academic_year,
+            })
+            class_years[class_name] = m.academic_year
 
         classrooms_data = [
             {"id": r.id, "name": r.name, "capacity": r.capacity}
@@ -135,7 +229,7 @@ def fetch_all_data(state: TimetableState) -> dict:
         ]
 
         # Derive distinct class names from mappings
-        class_names = sorted(set(m.class_name for m in mappings))
+        class_names = sorted(set(m["class_name"] for m in mappings_data))
 
         print(
             f"[fetch_all_data] {len(subjects_data)} subjects, "
@@ -147,15 +241,20 @@ def fetch_all_data(state: TimetableState) -> dict:
             "classes": class_names,
             "subjects": subjects_data,
             "faculty_mappings": mappings_data,
+            "class_years": class_years,
             "classrooms": classrooms_data,
             "labs": labs_data,
             "timetable": {},
             "room_schedule": {},
             "faculty_schedule": {},
+            "fixed_timetable_entries": fixed_timetable_entries,
             "conflicts": [],
             "warnings": [],
             "iteration": 0,
             "retry": 0,
+            "academic_year": academic_year,
+            "is_feasible": True,
+            "is_valid": True,
         }
     finally:
         db.close()
@@ -172,20 +271,48 @@ def build_constraints(state: TimetableState) -> dict:
     print("[build_constraints] Building constraint matrix...")
     mappings = state["faculty_mappings"]
     subjects_by_id = {s["id"]: s for s in state["subjects"]}
+    warnings = list(state.get("warnings", []))
 
-    class_reqs: Dict[str, list] = {}
+    raw_class_reqs: Dict[str, list] = {}
     for m in mappings:
         cn = m["class_name"]
         subj = subjects_by_id.get(m["subject_id"])
         if not subj:
             continue
-        class_reqs.setdefault(cn, []).append({
+        raw_class_reqs.setdefault(cn, []).append({
             "subject_id": subj["id"],
             "subject_name": subj["name"],
             "faculty_id": m["faculty_id"],
             "is_lab": subj["is_lab"],
             "hours": subj["hours_per_week"],
         })
+
+    class_reqs: Dict[str, list] = {}
+    for cn, reqs in raw_class_reqs.items():
+        lab_reqs = [req for req in reqs if req["is_lab"]]
+        lecture_reqs = [req for req in reqs if not req["is_lab"]]
+
+        normalized_labs = _normalize_lab_hours(lab_reqs)
+        normalized_lectures = _normalize_lecture_hours(lecture_reqs, TARGET_LECTURE_HOURS)
+
+        if not normalized_labs:
+            warnings.append(
+                f"{cn}: no lab subject found; cannot place the required two 3-hour lab periods."
+            )
+        elif len(lab_reqs) == 1:
+            warnings.append(
+                f"{cn}: one lab subject found, so it is scheduled as two separate 3-hour lab periods."
+            )
+        elif len(lab_reqs) > TARGET_LAB_BLOCKS:
+            warnings.append(
+                f"{cn}: more than two lab subjects found; only two lab periods are scheduled to keep 20 weekly hours."
+            )
+
+        total_hours = sum(req["hours"] for req in normalized_lectures + normalized_labs)
+        if total_hours != TARGET_WEEKLY_HOURS:
+            warnings.append(f"{cn}: normalized to {total_hours} hours instead of {TARGET_WEEKLY_HOURS}.")
+
+        class_reqs[cn] = normalized_lectures + normalized_labs
 
     # Store requirements inside timetable metadata
     timetable = state.get("timetable", {})
@@ -195,7 +322,7 @@ def build_constraints(state: TimetableState) -> dict:
         sum(r["hours"] for r in reqs) for reqs in class_reqs.values()
     )
     print(f"[build_constraints] Total teaching hours across all classes: {total_hours}")
-    return {"timetable": timetable}
+    return {"timetable": timetable, "warnings": warnings}
 
 
 # ─── Node: solve_timetable ───────────────────────────────────────────────────
@@ -219,7 +346,7 @@ def solve_timetable(state: TimetableState) -> dict:
     
     if not all_rooms:
         warnings.append("No rooms available for scheduling.")
-        return state
+        return {"warnings": warnings, "is_feasible": False}
 
     room_ids = [r["id"] for r in all_rooms]
     lab_ids = [r["id"] for r in labs]
@@ -309,11 +436,50 @@ def solve_timetable(state: TimetableState) -> dict:
             
             model.AddBoolOr([same_room.Not(), time_overlap.Not()])
 
+    fixed_entries = state.get("fixed_timetable_entries", [])
+    for session_index, session in enumerate(session_list):
+        start_var = session["start_slot"] if session["type"] == "lab" else session["slot"]
+        session_duration = session["duration"]
+        possible_starts = range(1, SLOTS_PER_DAY - session_duration + 2)
+
+        for fixed_index, fixed in enumerate(fixed_entries):
+            if fixed.get("day") not in DAYS or not fixed.get("slot"):
+                continue
+
+            fixed_day = DAYS.index(fixed["day"])
+            fixed_slot = int(fixed["slot"])
+            overlap_starts = [
+                start
+                for start in possible_starts
+                if start <= fixed_slot <= start + session_duration - 1
+            ]
+            if not overlap_starts:
+                continue
+
+            same_day = model.NewBoolVar(f"fixed_same_day_{session_index}_{fixed_index}")
+            model.Add(session["day"] == fixed_day).OnlyEnforceIf(same_day)
+            model.Add(session["day"] != fixed_day).OnlyEnforceIf(same_day.Not())
+
+            slot_overlap = model.NewBoolVar(f"fixed_slot_overlap_{session_index}_{fixed_index}")
+            overlap_table = [(value,) for value in overlap_starts]
+            model.AddAllowedAssignments([start_var], overlap_table).OnlyEnforceIf(slot_overlap)
+            model.AddForbiddenAssignments([start_var], overlap_table).OnlyEnforceIf(slot_overlap.Not())
+
+            if fixed.get("room_id"):
+                same_room = model.NewBoolVar(f"fixed_same_room_{session_index}_{fixed_index}")
+                model.Add(session["room"] == fixed["room_id"]).OnlyEnforceIf(same_room)
+                model.Add(session["room"] != fixed["room_id"]).OnlyEnforceIf(same_room.Not())
+                model.AddBoolOr([same_day.Not(), slot_overlap.Not(), same_room.Not()])
+
+            if fixed.get("faculty_id") and session["faculty_id"] == fixed["faculty_id"]:
+                model.AddBoolOr([same_day.Not(), slot_overlap.Not()])
+
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 60.0
     status = solver.Solve(model)
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+        is_feasible = True
         for cn in state["classes"]:
             if cn not in validated_tt:
                 validated_tt[cn] = {}
@@ -356,6 +522,7 @@ def solve_timetable(state: TimetableState) -> dict:
                 _book_room(room_schedule, room_id, day, slot, cn)
                 _book_faculty(faculty_schedule, fac_id, day, slot, cn)
     else:
+        is_feasible = False
         warnings.append("INFEASIBLE: Could not generate a timetable that satisfies all constraints (e.g. not enough rooms or faculty overlapping).")
 
     validated_tt["__requirements__"] = reqs
@@ -367,6 +534,7 @@ def solve_timetable(state: TimetableState) -> dict:
         "conflicts": [],
         "warnings": warnings,
         "iteration": 1,
+        "is_feasible": is_feasible,
     }
 
 
@@ -389,8 +557,23 @@ def validate_timetable(state: TimetableState) -> dict:
     faculty_slots: Dict[str, Set[str]] = {}   # "fac_id|day|slot" -> set of classes
     room_slots: Dict[str, Set[str]] = {}      # "room_id|day|slot" -> set of classes
 
+    for fixed in state.get("fixed_timetable_entries", []):
+        day = fixed.get("day")
+        slot = fixed.get("slot")
+        class_name = fixed.get("class_name", "existing class")
+        if not day or not slot:
+            continue
+        if fixed.get("faculty_id"):
+            fkey = f"{fixed['faculty_id']}|{day}|{slot}"
+            faculty_slots.setdefault(fkey, set()).add(class_name)
+        if fixed.get("room_id"):
+            rkey = f"{fixed['room_id']}|{day}|{slot}"
+            room_slots.setdefault(rkey, set()).add(class_name)
+
     for cn in state["classes"]:
         class_tt = timetable.get(cn, {})
+        scheduled_slots = 0
+        lab_slots = 0
         for day in DAYS:
             day_tt = class_tt.get(day, {})
             for sk, entry in day_tt.items():
@@ -403,12 +586,21 @@ def validate_timetable(state: TimetableState) -> dict:
                 if status == "suspended":
                     continue
 
+                scheduled_slots += 1
+                if entry.get("is_lab_period"):
+                    lab_slots += 1
+
                 if fid:
                     fkey = f"{fid}|{day}|{sk}"
                     faculty_slots.setdefault(fkey, set()).add(cn)
                 if rid:
                     rkey = f"{rid}|{day}|{sk}"
                     room_slots.setdefault(rkey, set()).add(cn)
+
+        if scheduled_slots != TARGET_WEEKLY_HOURS:
+            issues.append(f"{cn}: expected {TARGET_WEEKLY_HOURS} scheduled hours, found {scheduled_slots}")
+        if lab_slots != TARGET_LAB_HOURS:
+            issues.append(f"{cn}: expected {TARGET_LAB_BLOCKS} lab periods ({TARGET_LAB_HOURS} hours), found {lab_slots} lab hours")
 
     for fkey, classes in faculty_slots.items():
         if len(classes) > 1:
@@ -424,13 +616,14 @@ def validate_timetable(state: TimetableState) -> dict:
     else:
         print("[validate_timetable] Timetable is valid ✓")
 
-    return {"warnings": warnings, "conflicts": []}
+    return {"warnings": warnings, "conflicts": [], "is_valid": not issues}
 
 
 # ─── Conditional: valid or retry? ─────────────────────────────────────────────
 
 def check_valid(state: TimetableState) -> str:
-    # For now always proceed to save — issues are logged as warnings
+    if not state.get("is_feasible", True) or not state.get("is_valid", True):
+        return "invalid"
     return "valid"
 
 
@@ -443,8 +636,12 @@ def save_timetable(state: TimetableState) -> dict:
 
     db: Session = get_db_session()
     try:
-        # Clear existing timetable
-        db.query(Timetable).delete()
+        target_academic_year = state.get("academic_year")
+        class_years = state.get("class_years", {})
+        query = db.query(Timetable)
+        if target_academic_year:
+            query = query.filter(Timetable.academic_year == target_academic_year)
+        query.delete()
         db.flush()
 
         count = 0
@@ -457,6 +654,7 @@ def save_timetable(state: TimetableState) -> dict:
                         continue
                     tt = Timetable(
                         class_name=cn,
+                        academic_year=target_academic_year or class_years.get(cn),
                         day=day,
                         slot=int(sk),
                         subject_id=entry.get("subject_id"),
@@ -501,6 +699,7 @@ workflow.add_conditional_edges(
     check_valid,
     {
         "valid": "save_timetable",
+        "invalid": END,
         "retry": "solve_timetable",
     },
 )
@@ -512,7 +711,7 @@ timetable_app = workflow.compile()
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def run_timetable_scheduler() -> dict:
+def run_timetable_scheduler(academic_year: Optional[int] = None) -> dict:
     """Run the full timetable generation workflow and return final state."""
     print("=" * 60)
     print("Starting Timetable Scheduler Workflow")
@@ -522,15 +721,20 @@ def run_timetable_scheduler() -> dict:
         "classes": [],
         "subjects": [],
         "faculty_mappings": [],
+        "class_years": {},
         "classrooms": [],
         "labs": [],
         "timetable": {},
         "room_schedule": {},
         "faculty_schedule": {},
+        "fixed_timetable_entries": [],
         "conflicts": [],
         "warnings": [],
         "iteration": 0,
         "retry": 0,
+        "academic_year": academic_year,
+        "is_feasible": True,
+        "is_valid": True,
     }
 
     result = timetable_app.invoke(initial_state)

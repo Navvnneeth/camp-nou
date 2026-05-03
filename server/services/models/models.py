@@ -19,6 +19,7 @@ class Students(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     branch = Column(String)
+    academic_year = Column(Integer, nullable=True)
     created_at = Column(DateTime)
 
 
@@ -57,6 +58,7 @@ class SubjectFacultyMapping(Base):
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
     faculty_id = Column(Integer, ForeignKey("faculty.id"), nullable=False)
     class_name = Column(String, nullable=False)  # e.g. "CS-A", "CS-B"
+    academic_year = Column(Integer, nullable=True)
     created_at = Column(DateTime)
 
 
@@ -65,6 +67,7 @@ class Timetable(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     class_name = Column(String, nullable=False, index=True)
+    academic_year = Column(Integer, nullable=True, index=True)
     day = Column(String, nullable=False)          # "Monday", "Tuesday", etc.
     slot = Column(Integer, nullable=False)         # 1-6
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)

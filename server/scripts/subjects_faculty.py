@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 from services.models.models import Subjects, Faculty, SubjectFacultyMapping
 from services.dependencies.db import DBInvoker
 from datetime import datetime
@@ -6,7 +7,7 @@ from datetime import datetime
 
 def insert_subjects_faculty_from_excel(file, db_invoker: DBInvoker):
     """
-    Parse an Excel file with columns: subject, faculty, class, hours_per_week (optional).
+    Parse an Excel file with columns: subject, faculty, class, year (optional), hours_per_week (optional).
     - Auto-detects lab subjects (name contains 'lab', case-insensitive).
     - Lab subjects default to 3 hours/week, lecture subjects default to value in Excel or 1.
     - Creates Subjects, Faculty, and SubjectFacultyMapping entries (get-or-create).
@@ -27,10 +28,19 @@ def insert_subjects_faculty_from_excel(file, db_invoker: DBInvoker):
     faculty_cache = {}   # name -> Faculty ORM object
     mappings_created = 0
 
+    def parse_year(row, class_name):
+        for column in ("year", "academic_year", "batch_year"):
+            if column in df.columns and not pd.isna(row.get(column)):
+                return int(row[column])
+
+        match = re.search(r"(?:^|\D)([1-4])(?:st|nd|rd|th|y|yr|year)?(?:\D|$)", class_name.lower())
+        return int(match.group(1)) if match else None
+
     for _, row in df.iterrows():
         subject_name = str(row["subject"]).strip()
         faculty_name = str(row["faculty"]).strip()
         class_name = str(row["class"]).strip()
+        academic_year = parse_year(row, class_name)
 
         if not subject_name or not faculty_name or not class_name:
             continue
@@ -84,6 +94,7 @@ def insert_subjects_faculty_from_excel(file, db_invoker: DBInvoker):
             SubjectFacultyMapping.subject_id == subject_obj.id,
             SubjectFacultyMapping.faculty_id == faculty_obj.id,
             SubjectFacultyMapping.class_name == class_name,
+            SubjectFacultyMapping.academic_year == academic_year,
         ).first()
 
         if not existing_mapping:
@@ -91,6 +102,7 @@ def insert_subjects_faculty_from_excel(file, db_invoker: DBInvoker):
                 subject_id=subject_obj.id,
                 faculty_id=faculty_obj.id,
                 class_name=class_name,
+                academic_year=academic_year,
                 created_at=datetime.utcnow(),
             )
             db.add(mapping)

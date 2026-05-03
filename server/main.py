@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from services.models.base import Base
 from services.dependencies.db import engine, get_db_session
 from services.models.models import *
@@ -18,6 +19,10 @@ app.add_middleware(
 )
 
 Base.metadata.create_all(bind=engine)
+with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_year INTEGER"))
+    connection.execute(text("ALTER TABLE subject_faculty_mapping ADD COLUMN IF NOT EXISTS academic_year INTEGER"))
+    connection.execute(text("ALTER TABLE timetable ADD COLUMN IF NOT EXISTS academic_year INTEGER"))
 db = get_db_session()
 try:
     seed_default_rooms(db)

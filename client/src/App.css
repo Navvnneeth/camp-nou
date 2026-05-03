@@ -345,6 +345,10 @@
   flex-wrap: wrap;
 }
 
+.compact-field {
+  min-width: 160px;
+}
+
 .status-text {
   color: var(--text-muted);
 }
@@ -516,6 +520,12 @@
   border-color: rgba(255, 255, 255, 0.2);
 }
 
+.btn.danger {
+  background: rgba(255, 122, 89, 0.12);
+  border-color: rgba(255, 122, 89, 0.55);
+  color: var(--text);
+}
+
 .status-pill {
   padding: 4px 10px;
   border-radius: 999px;
@@ -667,6 +677,25 @@
   background: rgba(255, 255, 255, 0.05);
   color: var(--text-muted);
   font-size: 0.82rem;
+}
+
+.reset-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--stroke-soft);
+  background: rgba(10, 18, 23, 0.55);
+}
+
+.reset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .recommendation-status {
